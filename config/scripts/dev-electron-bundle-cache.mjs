@@ -3,8 +3,11 @@
 // about to rebuild, so siblings from renamed branches and past upgrades are never reclaimed --
 // measured at 143 directories / 38GB across one developer's worktrees.
 
-// A bundle takes tens of seconds to copy. Anything marker-less and newer than this is assumed to be
-// a build in flight rather than debris; generous because a cold copy on a busy machine is slow.
+// Measured from BUILD START, not from last activity: a directory's mtime only changes when a
+// top-level entry is created, so it freezes once `<app>.app` appears and the 276MB copy, helper
+// compiles and signing that follow never refresh it. So this is a hard cliff -- a build still
+// running after this long becomes eligible for deletion by a concurrent instance. Full builds
+// measured at 130-200s, so the margin is 5-10x.
 export const IN_PROGRESS_WINDOW_MS = 15 * 60 * 1000
 
 /**
@@ -25,10 +28,18 @@ export const IN_PROGRESS_WINDOW_MS = 15 * 60 * 1000
  * directory is immune to spaces and shell-significant characters in the path, and the trailing
  * slash keeps `<dir>2` from being mistaken for `<dir>`.
  */
+export function isDevBundleInUse(dir, processTable) {
+  // Both spellings: macOS realpaths /tmp to /private/tmp, and `ps` preserves whatever spelling the
+  // process was launched with. A mismatch would read as "not running" and delete a live bundle.
+  // Checking both can only ever protect more, which is the safe direction.
+  const alternate = dir.startsWith('/private/') ? dir.slice('/private'.length) : `/private${dir}`
+  return processTable.includes(`${dir}/`) || processTable.includes(`${alternate}/`)
+}
+
 export function selectStaleDevBundleDirs({ bundles, currentDir, processTable, nowMs }) {
   return bundles
     .filter(({ dir, hasMarker, mtimeMs }) => {
-      if (dir === currentDir || processTable.includes(`${dir}/`)) {
+      if (dir === currentDir || isDevBundleInUse(dir, processTable)) {
         return false
       }
       const buildInFlight = !hasMarker && nowMs - mtimeMs < IN_PROGRESS_WINDOW_MS

@@ -17,7 +17,7 @@ import net from 'node:net'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { prepareDevCliTerminalWrappers } from './dev-cli-terminal-wrapper.mjs'
-import { selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
+import { isDevBundleInUse, selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
 import {
   DEV_BUNDLE_ID,
   getDevBundlePlistPatches,
@@ -265,6 +265,23 @@ function prepareMacDevElectronApp() {
 
   if (copiedAppIsUsable()) {
     pruneStaleDevBundles(distDir)
+    process.env.ELECTRON_EXEC_PATH = executablePath
+    return
+  }
+
+  // Why this guard: a rebuild replaces this exact directory, and making the marker conditional on a
+  // successful sign means an unsigned bundle is a permanent cache miss -- so every later run would
+  // reach this rmSync while another instance is still running from it, deleting its app mid-session.
+  // Reusing what is there matches what the runner did before the marker became conditional.
+  const rebuildProcessTable = getDevBundleProcessTable()
+  if (
+    rebuildProcessTable !== null &&
+    isDevBundleInUse(distDir, rebuildProcessTable) &&
+    existsSync(executablePath)
+  ) {
+    console.warn(
+      `[orca-dev] Another dev instance is running from this bundle; reusing it instead of rebuilding.`
+    )
     process.env.ELECTRON_EXEC_PATH = executablePath
     return
   }

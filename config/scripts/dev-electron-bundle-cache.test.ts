@@ -1,5 +1,9 @@
 import { describe, expect, it } from 'vitest'
-import { IN_PROGRESS_WINDOW_MS, selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
+import {
+  IN_PROGRESS_WINDOW_MS,
+  isDevBundleInUse,
+  selectStaleDevBundleDirs
+} from './dev-electron-bundle-cache.mjs'
 
 const NOW = 1_800_000_000_000
 const ROOT = '/repo/out/electron-dev'
@@ -98,6 +102,23 @@ describe('dev-electron-bundle-cache', () => {
         nowMs: NOW
       })
     ).toEqual([A])
+  })
+
+  it('matches a live bundle across the /tmp and /private/tmp spellings', () => {
+    // macOS realpaths /tmp to /private/tmp, and `ps` preserves whatever spelling the process was
+    // launched with. A mismatch would read as "not running" and delete a live bundle.
+    const priv = '/private/tmp/wt/out/electron-dev/aaaaaaaaaaaa'
+    const plain = '/tmp/wt/out/electron-dev/aaaaaaaaaaaa'
+    expect(isDevBundleInUse(priv, psLine(plain))).toBe(true)
+    expect(isDevBundleInUse(plain, psLine(priv))).toBe(true)
+    expect(isDevBundleInUse(priv, psLine('/private/tmp/wt/out/electron-dev/bbbbbbbbbbbb'))).toBe(
+      false
+    )
+  })
+
+  it('still honours the path boundary across spellings', () => {
+    const priv = '/private/tmp/wt/out/electron-dev/aaaaaaaaaaaa'
+    expect(isDevBundleInUse(priv, psLine('/tmp/wt/out/electron-dev/aaaaaaaaaaaa2'))).toBe(false)
   })
 
   it('reclaims nothing when every directory is current or live', () => {
