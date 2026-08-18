@@ -170,11 +170,12 @@ export function pruneStaleShellReadyWrapperRoots(
  *  attacker's choosing.
  *
  *  Why the retry: a crash between the write and the rename strands a temp file
- *  at that same deterministic name. Once the OS reuses that pid, O_EXCL would
- *  fail on every future attempt, wrappers would never regenerate, and every
- *  terminal would eat the full readiness timeout forever. Unlinking removes a
- *  planted symlink itself rather than its target, so retrying keeps the
- *  guarantee above. */
+ *  at that same deterministic name, so the first write after the OS reuses that
+ *  pid fails. The caller's catch unlinks the blocking path and the counter has
+ *  already advanced, so this recovers on its own -- the cost is one wrapper-less
+ *  launch, and that launch eats the full readiness timeout. Retrying here spends
+ *  a syscall to avoid that one stall. Unlinking removes a planted symlink itself
+ *  rather than its target, so it keeps the guarantee above. */
 function writeTempFileExclusively(tempPath: string, content: string): void {
   try {
     writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
