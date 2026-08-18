@@ -21,7 +21,10 @@ export function getShellReadyWrapperBaseDir(): string {
   // Why: bundled into the daemon fork (no electron), so read ORCA_USER_DATA_PATH rather than electron's userData; main and the fork both set it to the same path.
   // Why not the legacy `shell-ready/`: daemons of older builds still write that
   // path unconditionally, so this build's trees live out of their reach.
-  const userDataPath = process.env.ORCA_USER_DATA_PATH ?? tmpdir()
+  // Why `||` and not `??`: an empty ORCA_USER_DATA_PATH would leave a relative
+  // base dir, and the pruner recursively removes directories under it -- that
+  // must never resolve against the process cwd. Matches the daemon resolver.
+  const userDataPath = process.env.ORCA_USER_DATA_PATH || tmpdir()
   return join(userDataPath, 'shell-wrappers')
 }
 

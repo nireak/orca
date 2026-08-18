@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { isAbsolute, join } from 'node:path'
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import {
   describePosix,
@@ -30,6 +30,22 @@ describe('shell-ready wrapper root resolution', () => {
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
+  })
+
+  // Why: the pruner recursively removes directories under the base dir, so a
+  // relative base would resolve against the process cwd and delete whatever
+  // happened to sit there. An empty env var must fall back, not pass through.
+  it.each([
+    ['empty', ''],
+    ['unset', undefined]
+  ])('resolves an absolute base dir when ORCA_USER_DATA_PATH is %s', async (_label, value) => {
+    if (value === undefined) {
+      delete process.env.ORCA_USER_DATA_PATH
+    } else {
+      setTestUserDataPath(value)
+    }
+    const { getShellReadyWrapperBaseDir } = await import('./local-pty-shell-ready-wrapper-root')
+    expect(isAbsolute(getShellReadyWrapperBaseDir())).toBe(true)
   })
 })
 
