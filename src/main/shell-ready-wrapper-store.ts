@@ -147,17 +147,39 @@ export function pruneStaleShellReadyWrapperRoots(
   }
 }
 
+/** Creates `tempPath` with O_EXCL, clearing a stranded temp file if one blocks it.
+ *
+ *  Why O_EXCL: the temp name is derived from the pid, so it is predictable, and
+ *  a plain write would follow a symlink planted there -- turning an
+ *  Orca-authored shell script into an arbitrary-file write at a target of the
+ *  attacker's choosing.
+ *
+ *  Why the retry: a crash between the write and the rename strands a temp file
+ *  at that same deterministic name. Once the OS reuses that pid, O_EXCL would
+ *  fail on every future attempt, wrappers would never regenerate, and every
+ *  terminal would eat the full readiness timeout forever. Unlinking removes a
+ *  planted symlink itself rather than its target, so retrying keeps the
+ *  guarantee above. */
+function writeTempFileExclusively(tempPath: string, content: string): void {
+  try {
+    writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw error
+    }
+    rmSync(tempPath, { force: true, recursive: true })
+    writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
+  }
+}
+
 // Why: a torn write still satisfies the existence check, so the shell would
 // source a truncated wrapper and never reach the line that emits the marker.
 function writeWrapperFileAtomically(path: string, content: string): void {
   tempFileCounter += 1
   const tempPath = `${path}.tmp-${process.pid}-${tempFileCounter}`
   try {
-    // Why `wx`: fails rather than writing through a pre-existing path at this
-    // predictable name. Without it a planted symlink turns an Orca-authored
-    // shell script into an arbitrary-file write at the attacker's target.
-    writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
-    // Why chmod anyway: the mode above is masked by umask.
+    writeTempFileExclusively(tempPath, content)
+    // Why chmod anyway: the mode passed to open() is masked by umask.
     chmodSync(tempPath, 0o644)
     renameSync(tempPath, path)
   } catch (error) {

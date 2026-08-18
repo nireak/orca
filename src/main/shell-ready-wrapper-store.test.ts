@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   existsSync,
   mkdirSync,
@@ -68,6 +68,33 @@ describe('writeShellReadyWrappers', () => {
     writeShellReadyWrappers(root, build)
     expect(shellReadyWrappersExistAt(root, build)).toBe(true)
     expect(readFileSync(join(root, 'bash', 'rcfile'), 'utf8')).toBe('rcfile a')
+    expect(readdirSync(join(root, 'bash')).filter((n) => n.includes('.tmp-'))).toEqual([])
+  })
+
+  // Why: the temp name is derived from the pid, so a crash between write and
+  // rename strands a file that a later same-pid process collides with. O_EXCL
+  // alone would then fail forever and wrappers would never regenerate --
+  // turning a hardening measure into a permanent terminal stall.
+  it('recovers from a temp file stranded by a crashed process', async () => {
+    const base = makeBase()
+    // A single-file set so the fresh module's first write is unambiguously this
+    // file, landing on temp counter 1.
+    const build: ShellReadyWrapperBuilder = () => [
+      { relativePath: join('bash', 'rcfile'), content: 'rcfile a' }
+    ]
+    const root = resolveShellReadyWrapperRoot(base, build)
+    const rcfile = join(root, 'bash', 'rcfile')
+    mkdirSync(dirname(rcfile), { recursive: true })
+    // A fresh module instance restarts the temp counter at 0, so this is exactly
+    // the name a crashed predecessor with a since-reused pid would have left.
+    writeFileSync(`${rcfile}.tmp-${process.pid}-1`, 'stranded by a crashed process')
+
+    vi.resetModules()
+    const fresh = await import('./shell-ready-wrapper-store')
+
+    expect(() => fresh.writeShellReadyWrappers(root, build)).not.toThrow()
+    expect(fresh.shellReadyWrappersExistAt(root, build)).toBe(true)
+    expect(readFileSync(rcfile, 'utf8')).toBe('rcfile a')
     expect(readdirSync(join(root, 'bash')).filter((n) => n.includes('.tmp-'))).toEqual([])
   })
 
