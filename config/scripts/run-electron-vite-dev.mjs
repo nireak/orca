@@ -135,22 +135,35 @@ function getDevBundleProcessTable() {
 
 function pruneStaleDevBundles(distDir) {
   const root = path.dirname(distDir)
-  let dirs
+  let bundles
   try {
-    dirs = readdirSync(root, { withFileTypes: true })
+    bundles = readdirSync(root, { withFileTypes: true })
       .filter((entry) => entry.isDirectory())
-      .map((entry) => path.join(root, entry.name))
+      .map((entry) => {
+        const dir = path.join(root, entry.name)
+        return {
+          dir,
+          hasMarker: existsSync(path.join(dir, 'orca-dev-electron-app.json')),
+          mtimeMs: getMtimeMs(dir)
+        }
+      })
   } catch {
     return
   }
-  if (dirs.length <= 1) {
+  if (bundles.length <= 1) {
     return
   }
   const processTable = getDevBundleProcessTable()
   if (processTable === null) {
     return
   }
-  for (const dir of selectStaleDevBundleDirs({ dirs, currentDir: distDir, processTable })) {
+  const stale = selectStaleDevBundleDirs({
+    bundles,
+    currentDir: distDir,
+    processTable,
+    nowMs: Date.now()
+  })
+  for (const dir of stale) {
     try {
       rmSync(dir, { recursive: true, force: true })
     } catch {}

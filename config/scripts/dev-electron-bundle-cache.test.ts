@@ -1,10 +1,16 @@
 import { describe, expect, it } from 'vitest'
-import { selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
+import { IN_PROGRESS_WINDOW_MS, selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
 
+const NOW = 1_800_000_000_000
 const ROOT = '/repo/out/electron-dev'
 const A = `${ROOT}/aaaaaaaaaaaa`
 const B = `${ROOT}/bbbbbbbbbbbb`
 const C = `${ROOT}/cccccccccccc`
+
+/** A finished bundle: marker present, copied long ago. */
+function settled(dir: string) {
+  return { dir, hasMarker: true, mtimeMs: NOW - IN_PROGRESS_WINDOW_MS * 2 }
+}
 
 /** A `ps -Awwo command=` line for a dev instance running out of `dir`. */
 function psLine(dir: string, appName = 'Orca: some-branch') {
@@ -13,31 +19,40 @@ function psLine(dir: string, appName = 'Orca: some-branch') {
 
 describe('dev-electron-bundle-cache', () => {
   it('reclaims siblings while keeping the current bundle', () => {
-    expect(selectStaleDevBundleDirs({ dirs: [A, B, C], currentDir: B, processTable: '' })).toEqual([
-      A,
-      C
-    ])
+    expect(
+      selectStaleDevBundleDirs({
+        bundles: [settled(A), settled(B), settled(C)],
+        currentDir: B,
+        processTable: '',
+        nowMs: NOW
+      })
+    ).toEqual([A, C])
   })
 
   it('never reclaims a bundle a live process is running from', () => {
     // Deleting a bundle out from under a live Electron process can crash it mid-session, and
     // developers routinely run several dev instances at once.
     expect(
-      selectStaleDevBundleDirs({ dirs: [A, B, C], currentDir: B, processTable: psLine(A) })
+      selectStaleDevBundleDirs({
+        bundles: [settled(A), settled(B), settled(C)],
+        currentDir: B,
+        processTable: psLine(A),
+        nowMs: NOW
+      })
     ).toEqual([C])
   })
 
   it('protects a live bundle whose path contains spaces', () => {
     // Regression: an extraction regex using \S* could not cross a space, so any developer with a
-    // space in their checkout path (or in the .app name, which always has one) got "nothing is
-    // live" and had the running instance's bundle deleted.
+    // space in their checkout path got "nothing is live" and had the running bundle deleted.
     const spaced = '/Users/me/My Projects/orca/out/electron-dev/aaaaaaaaaaaa'
     const other = '/Users/me/My Projects/orca/out/electron-dev/bbbbbbbbbbbb'
     expect(
       selectStaleDevBundleDirs({
-        dirs: [spaced, other],
+        bundles: [settled(spaced), settled(other)],
         currentDir: C,
-        processTable: psLine(spaced, 'Orca: my branch')
+        processTable: psLine(spaced, 'Orca: my branch'),
+        nowMs: NOW
       })
     ).toEqual([other])
   })
@@ -47,14 +62,55 @@ describe('dev-electron-bundle-cache', () => {
     // needle, `A` would be found inside `A2`'s path and wrongly spared.
     const a2 = `${A}2`
     expect(
-      selectStaleDevBundleDirs({ dirs: [A, a2], currentDir: C, processTable: psLine(a2) })
+      selectStaleDevBundleDirs({
+        bundles: [settled(A), settled(a2)],
+        currentDir: C,
+        processTable: psLine(a2),
+        nowMs: NOW
+      })
+    ).toEqual([A])
+  })
+
+  it('never deletes a bundle that is still being copied', () => {
+    // Between mkdirSync and the marker write there is a ~270MB copy taking tens of seconds, during
+    // which the directory exists, has no marker, and cannot appear in `ps` because its instance has
+    // not launched yet. A concurrently starting instance would otherwise delete it mid-copy.
+    const inFlight = { dir: A, hasMarker: false, mtimeMs: NOW - 30_000 }
+    expect(
+      selectStaleDevBundleDirs({
+        bundles: [inFlight, settled(B)],
+        currentDir: C,
+        processTable: '',
+        nowMs: NOW
+      })
+    ).toEqual([B])
+  })
+
+  it('reclaims a marker-less bundle once it is too old to be in flight', () => {
+    // A build that crashed partway leaves the same signature; only age separates it from the case
+    // above, otherwise abandoned debris would be protected forever.
+    const abandoned = { dir: A, hasMarker: false, mtimeMs: NOW - IN_PROGRESS_WINDOW_MS - 1 }
+    expect(
+      selectStaleDevBundleDirs({
+        bundles: [abandoned],
+        currentDir: C,
+        processTable: '',
+        nowMs: NOW
+      })
     ).toEqual([A])
   })
 
   it('reclaims nothing when every directory is current or live', () => {
     expect(
-      selectStaleDevBundleDirs({ dirs: [A, B], currentDir: A, processTable: psLine(B) })
+      selectStaleDevBundleDirs({
+        bundles: [settled(A), settled(B)],
+        currentDir: A,
+        processTable: psLine(B),
+        nowMs: NOW
+      })
     ).toEqual([])
-    expect(selectStaleDevBundleDirs({ dirs: [], currentDir: A, processTable: '' })).toEqual([])
+    expect(
+      selectStaleDevBundleDirs({ bundles: [], currentDir: A, processTable: '', nowMs: NOW })
+    ).toEqual([])
   })
 })
