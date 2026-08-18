@@ -10,6 +10,8 @@ import {
   restoreUserDataPathAfterEach,
   setTestUserDataPath
 } from './local-pty-shell-ready-test-harness'
+// Why resolved rather than hardcoded: the wrapper tree is content-addressed.
+import { getShellReadyWrapperRoot } from './local-pty-shell-ready-wrapper-root'
 
 restoreUserDataPathAfterEach()
 
@@ -243,7 +245,7 @@ describePosix('live zsh subprocess tests', () => {
       const { getShellReadyLaunchConfig } = await importFreshLocalPtyShellReady()
       getShellReadyLaunchConfig('/bin/zsh')
 
-      const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
+      const zshenv = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshenv'), 'utf8')
 
       // Verify wrapper checks the resolved source root is non-empty before sourcing
       expect(zshenv).toContain('if [[ -n "${_orca_zshenv_source_dir:-}"')

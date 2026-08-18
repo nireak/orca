@@ -1,6 +1,5 @@
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, win32 as pathWin32 } from 'node:path'
-import { chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
+import { basename, join, win32 as pathWin32 } from 'node:path'
 import {
   encodePowerShellCommand,
   getPowerShellOsc133Bootstrap,
@@ -8,20 +7,45 @@ import {
 } from '../powershell-osc133-bootstrap'
 import { getFishCodexShellLaunchPreflight } from '../pty/codex-shell-launch-preflight'
 import { getFishShellReadyInitCommand } from '../shell-templates'
-import { buildZshStartupWrapperFiles } from '../zsh-startup-wrapper-builder'
+import {
+  pruneStaleShellReadyWrapperRoots,
+  resolveShellReadyWrapperRoot,
+  shellReadyWrappersExistAt,
+  writeShellReadyWrappers
+} from '../shell-ready-wrapper-store'
 import { SHELL_READY_MARKER } from './daemon-shell-ready-marker'
-import { getDaemonBashShellReadyRcfileContent } from './daemon-bash-shell-ready-rcfile'
-import { getDaemonZshWrapperSpec } from './daemon-zsh-shell-ready-wrapper-spec'
+import { buildDaemonShellReadyWrapperFiles } from './daemon-shell-ready-wrapper-fileset'
 
 const ORCA_USER_DATA_PATH_ENV = 'ORCA_USER_DATA_PATH'
 
 let didEnsureShellReadyWrappers = false
 
-function getShellReadyWrapperRoot(): string {
+function getShellReadyWrapperBaseDir(): string {
   const userDataPath = process.env[ORCA_USER_DATA_PATH_ENV]
-  // Why: older/test launchers may not seed ORCA_USER_DATA_PATH. Keep a
-  // fallback so daemon startup does not fail before the parent can be fixed.
-  return join(userDataPath || tmpdir(), userDataPath ? 'shell-ready' : 'orca-shell-ready')
+  // Why a base dir of its own rather than the legacy `shell-ready/`: daemons of
+  // older builds still write that path unconditionally, so leaving it to them
+  // keeps this build's content-addressed trees out of their reach (and out of
+  // reach of the pruner).
+  // Why the tmpdir fallback: older/test launchers may not seed
+  // ORCA_USER_DATA_PATH, and daemon startup must not fail before the parent
+  // can be fixed.
+  return join(userDataPath || tmpdir(), userDataPath ? 'shell-wrappers' : 'orca-shell-wrappers')
+}
+
+// Why memoized: the digest is stable for a given base dir and every shell
+// launch asks for it. Why keyed on the base dir rather than a bare flag: it
+// self-invalidates if ORCA_USER_DATA_PATH is ever re-pointed mid-process.
+let cachedShellReadyWrapperRoot: { baseDir: string; root: string } | null = null
+
+export function getShellReadyWrapperRoot(): string {
+  const baseDir = getShellReadyWrapperBaseDir()
+  if (cachedShellReadyWrapperRoot?.baseDir !== baseDir) {
+    cachedShellReadyWrapperRoot = {
+      baseDir,
+      root: resolveShellReadyWrapperRoot(baseDir, buildDaemonShellReadyWrapperFiles)
+    }
+  }
+  return cachedShellReadyWrapperRoot.root
 }
 
 // Why: if our own process inherited ZDOTDIR from a parent shell that was
@@ -65,50 +89,24 @@ function resolveOriginalZshenvSourceDir(): string {
   return normalizeOriginalZdotdirCandidate(process.env.ZDOTDIR) || process.env.HOME || ''
 }
 
-function getRequiredShellReadyWrapperPaths(root = getShellReadyWrapperRoot()): string[] {
-  return [
-    join(root, 'zsh', '.zshenv'),
-    join(root, 'zsh', '.zprofile'),
-    join(root, 'zsh', '.zshrc'),
-    join(root, 'zsh', '.zlogin'),
-    join(root, 'bash', 'rcfile')
-  ]
-}
-
-function shellReadyWrappersExist(): boolean {
-  return getRequiredShellReadyWrapperPaths().every((path) => existsSync(path))
-}
-
 function ensureShellReadyWrappers(): void {
   if (process.platform === 'win32') {
     return
   }
-  if (didEnsureShellReadyWrappers && shellReadyWrappersExist()) {
+  const root = getShellReadyWrapperRoot()
+  // Why existence-only is safe now: the root is keyed by a hash of the exact
+  // bytes below, so a tree that is present is a tree this build wrote.
+  if (
+    didEnsureShellReadyWrappers &&
+    shellReadyWrappersExistAt(root, buildDaemonShellReadyWrapperFiles)
+  ) {
     return
   }
   didEnsureShellReadyWrappers = true
 
-  const root = getShellReadyWrapperRoot()
-  const zshDir = join(root, 'zsh')
-  const bashDir = join(root, 'bash')
-
-  const zsh = buildZshStartupWrapperFiles(getDaemonZshWrapperSpec(zshDir))
-  const bashRc = getDaemonBashShellReadyRcfileContent()
-
-  const files = [
-    [join(zshDir, '.zshenv'), zsh.zshenv],
-    [join(zshDir, '.zprofile'), zsh.zprofile],
-    [join(zshDir, '.zshrc'), zsh.zshrc],
-    [join(zshDir, '.zlogin'), zsh.zlogin],
-    [join(bashDir, 'rcfile'), bashRc]
-  ] as const
-
   try {
-    for (const [path, content] of files) {
-      mkdirSync(dirname(path), { recursive: true })
-      writeFileSync(path, content, 'utf8')
-      chmodSync(path, 0o644)
-    }
+    writeShellReadyWrappers(root, buildDaemonShellReadyWrapperFiles)
+    pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
   } catch (error) {
     // Why: wrapper file creation can fail due to read-only filesystems, permission
     // issues, or disk space. Rather than crashing, log the error and continue.

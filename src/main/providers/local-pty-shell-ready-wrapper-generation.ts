@@ -4,46 +4,22 @@
  * Why: the wrappers emit an OSC 777 marker after startup files finish, which the
  * readiness scanner watches for before a startup command is written.
  */
-import { mkdirSync, writeFileSync, chmodSync } from 'node:fs'
 import {
-  buildZshStartupWrapperFiles,
-  type ZshStartupWrapperSpec
-} from '../zsh-startup-wrapper-builder'
-import { getBashShellReadyRcfileContent } from './local-pty-shell-ready-bash-rcfile'
+  pruneStaleShellReadyWrapperRoots,
+  writeShellReadyWrappers
+} from '../shell-ready-wrapper-store'
+import { buildZshStartupWrapperFiles } from '../zsh-startup-wrapper-builder'
 import {
+  buildLocalShellReadyWrapperFiles,
+  getLocalZshWrapperSpec
+} from './local-pty-shell-ready-wrapper-fileset'
+import {
+  getShellReadyWrapperBaseDir,
   getShellReadyWrapperRoot,
-  shellReadyWrappersExist,
-  SHELL_READY_MARKER_ESCAPED
+  shellReadyWrappersExist
 } from './local-pty-shell-ready-wrapper-root'
 
 let didEnsureShellReadyWrappers = false
-
-function getLocalZshWrapperSpec(zshDir: string): ZshStartupWrapperSpec {
-  return {
-    headerLabel: 'Orca zsh shell-ready wrapper',
-    zshDir,
-    zshenvStrategy: 'discover-user-zdotdir',
-    readyMarkerEscaped: SHELL_READY_MARKER_ESCAPED,
-    osc133CommandMarkers: true,
-    skipUserZshrcWhenHomeIsWrapperDir: true,
-    interactiveRestoreComment:
-      "# Why: ~/.zshrc can export the user's default OpenCode config after spawn.",
-    loginRestoreComment:
-      '# Why: .zlogin is the final login startup file before the prompt is shown.',
-    restores: {
-      agentTeamsPath: true,
-      remoteCliBinDir: false,
-      codexHome: true,
-      codexLaunchPreflight: true
-    },
-    readyMarkerOrder: 'before-zdotdir-restore',
-    legacyFormatting: {
-      unindentedMimocodeRestore: true,
-      codexHomeRestoreComment:
-        "# Why: Codex must keep using Orca's runtime CODEX_HOME after rc files."
-    }
-  }
-}
 
 export function getZshShellReadyRcfileContent(): string {
   return buildZshStartupWrapperFiles(getLocalZshWrapperSpec(`${getShellReadyWrapperRoot()}/zsh`))
@@ -51,31 +27,19 @@ export function getZshShellReadyRcfileContent(): string {
 }
 
 export function ensureShellReadyWrappersAt(root = getShellReadyWrapperRoot()): void {
+  // Why existence-only is safe: the default root is keyed by a hash of the exact
+  // bytes we would write, so a tree that is present is a tree this build wrote.
   if (didEnsureShellReadyWrappers && shellReadyWrappersExist(root)) {
     return
   }
   didEnsureShellReadyWrappers = true
 
-  const zshDir = `${root}/zsh`
-  const bashDir = `${root}/bash`
-
-  const zsh = buildZshStartupWrapperFiles(getLocalZshWrapperSpec(zshDir))
-  const bashRc = getBashShellReadyRcfileContent()
-
-  const files = [
-    [`${zshDir}/.zshenv`, zsh.zshenv],
-    [`${zshDir}/.zprofile`, zsh.zprofile],
-    [`${zshDir}/.zshrc`, zsh.zshrc],
-    [`${zshDir}/.zlogin`, zsh.zlogin],
-    [`${bashDir}/rcfile`, bashRc]
-  ] as const
-
   try {
-    for (const [path, content] of files) {
-      const dir = path.slice(0, path.lastIndexOf('/'))
-      mkdirSync(dir, { recursive: true })
-      writeFileSync(path, content, 'utf8')
-      chmodSync(path, 0o644)
+    writeShellReadyWrappers(root, buildLocalShellReadyWrapperFiles)
+    // Why guarded: callers may target an explicit root (tests, snapshots); only
+    // the managed default owns the base dir and may collect siblings there.
+    if (root === getShellReadyWrapperRoot()) {
+      pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
     }
   } catch (error) {
     // Why: degrade gracefully — a failed wrapper (read-only FS, perms, disk) just means no ready marker, PTY stays usable.

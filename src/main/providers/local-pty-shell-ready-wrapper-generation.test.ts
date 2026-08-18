@@ -12,6 +12,9 @@ import {
 // Why: rcfile content is pure, so a static import is equivalent to the fresh-module import used for wrapper writing.
 import { getBashShellReadyRcfileContent } from './local-pty-shell-ready-bash-rcfile'
 import { getZshShellReadyRcfileContent } from './local-pty-shell-ready-wrapper-generation'
+// Why resolved rather than hardcoded: the wrapper tree is content-addressed, so
+// a test that bakes in the layout stops proving anything the moment it moves.
+import { getShellReadyWrapperRoot } from './local-pty-shell-ready-wrapper-root'
 
 restoreUserDataPathAfterEach()
 
@@ -23,7 +26,7 @@ describe('shell-ready wrapper root resolution', () => {
       setTestUserDataPath(root)
       const { getShellReadyLaunchConfig } = await importFreshLocalPtyShellReady()
       const config = getShellReadyLaunchConfig('/bin/zsh')
-      expect(config.env.ZDOTDIR).toBe(`${root}/shell-ready/zsh`)
+      expect(config.env.ZDOTDIR).toBe(join(getShellReadyWrapperRoot(), 'zsh'))
     } finally {
       rmSync(root, { recursive: true, force: true })
     }
@@ -236,10 +239,10 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
-    const zprofile = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zprofile'), 'utf8')
-    const zshrc = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshrc'), 'utf8')
-    const zlogin = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zlogin'), 'utf8')
+    const zshenv = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshenv'), 'utf8')
+    const zprofile = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zprofile'), 'utf8')
+    const zshrc = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshrc'), 'utf8')
+    const zlogin = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zlogin'), 'utf8')
     expect(zshenv).toContain('_orca_user_zdotdir="${_orca_spawn_orig_zdotdir:-$HOME}"')
     expect(zshenv).toContain('printf "\\033]777;orca-shell-start:%s\\007" "$$"')
     expect(zshenv).toContain('*/shell-ready/zsh) _orca_user_zdotdir="$HOME" ;;')
@@ -256,7 +259,7 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zlogin = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zlogin'), 'utf8')
+    const zlogin = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zlogin'), 'utf8')
     expect(zlogin).toContain('zle -N zle-line-init __orca_prompt_mark')
     expect(zlogin).toContain('__orca_prev_line_init_fn="${widgets[zle-line-init]#user:}"')
     expect(zlogin).toContain('printf "\\033]777;orca-shell-ready\\007"')
@@ -271,8 +274,8 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zshrc = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshrc'), 'utf8')
-    const zlogin = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zlogin'), 'utf8')
+    const zshrc = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshrc'), 'utf8')
+    const zlogin = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zlogin'), 'utf8')
     const bashRc = getBashShellReadyRcfileContent()
     const restoreLine =
       '[[ -n "${ORCA_OPENCODE_CONFIG_DIR:-}" ]] && export OPENCODE_CONFIG_DIR="${ORCA_OPENCODE_CONFIG_DIR}"'
@@ -494,7 +497,7 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
+    const zshenv = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshenv'), 'utf8')
 
     expect(zshenv).toContain('unset ZDOTDIR')
     expect(zshenv).toContain('_orca_zshenv_source_dir="${ORCA_ZSHENV_SOURCE_DIR:-$HOME}"')
@@ -512,7 +515,7 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
+    const zshenv = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshenv'), 'utf8')
 
     // Save spawn-env value before sourcing user .zshenv
     expect(zshenv).toContain('_orca_spawn_orig_zdotdir="${ORCA_ORIG_ZDOTDIR:-}"')
@@ -527,7 +530,7 @@ describePosix('local PTY shell-ready launch config', () => {
 
     getShellReadyLaunchConfig('/bin/zsh')
 
-    const zshenv = readFileSync(join(userDataPath, 'shell-ready', 'zsh', '.zshenv'), 'utf8')
+    const zshenv = readFileSync(join(getShellReadyWrapperRoot(), 'zsh', '.zshenv'), 'utf8')
 
     // Why: derive wrapper dir from %x, not env $ZDOTDIR — zsh corrupts non-ASCII usernames in its 0x84-0x9D token range.
     expect(zshenv).toContain('_orca_wrapper_zdotdir_self="${${(%):-%x}:h}"')
@@ -542,7 +545,7 @@ describePosix('local PTY shell-ready launch config', () => {
       'if [[ -n "${_orca_wrapper_zdotdir_self:-}" && -f "${_orca_wrapper_zdotdir_self:-}/.zshenv" ]]; then\n' +
         '  export ZDOTDIR="${_orca_wrapper_zdotdir_self:-}"\n' +
         'else\n' +
-        `  export ZDOTDIR='${join(userDataPath, 'shell-ready', 'zsh')}'\n` +
+        `  export ZDOTDIR='${join(getShellReadyWrapperRoot(), 'zsh')}'\n` +
         'fi'
     )
     // Capture must happen before the wrapper unsets ZDOTDIR to source user files.

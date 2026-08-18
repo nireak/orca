@@ -10,7 +10,10 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 import { ensureShellReadyWrappersAt } from './providers/local-pty-shell-ready-wrapper-generation'
-import { getShellReadyLaunchConfig as getDaemonShellReadyLaunchConfig } from './daemon/shell-ready'
+import {
+  getShellReadyLaunchConfig as getDaemonShellReadyLaunchConfig,
+  getShellReadyWrapperRoot as getDaemonShellReadyWrapperRoot
+} from './daemon/shell-ready'
 import { ensureOverlayRestoreWrappers } from '../relay/pty-shell-overlay-wrappers'
 import { getShellReadyLaunchConfig as getLocalShellReadyLaunchConfig } from './providers/local-pty-shell-ready'
 
@@ -71,7 +74,7 @@ describePosix('generated shell wrapper files', () => {
   it('daemon wrappers', async () => {
     process.env.ORCA_USER_DATA_PATH = root
     getDaemonShellReadyLaunchConfig('/bin/zsh')
-    await expectWrapperFiles('daemon', join(root, 'shell-ready'))
+    await expectWrapperFiles('daemon', getDaemonShellReadyWrapperRoot())
   })
 
   it('relay overlay wrappers', async () => {
