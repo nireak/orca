@@ -21,11 +21,15 @@ export function getShellReadyWrapperBaseDir(): string {
   // Why: bundled into the daemon fork (no electron), so read ORCA_USER_DATA_PATH rather than electron's userData; main and the fork both set it to the same path.
   // Why not the legacy `shell-ready/`: daemons of older builds still write that
   // path unconditionally, so this build's trees live out of their reach.
-  // Why `||` and not `??`: an empty ORCA_USER_DATA_PATH would leave a relative
-  // base dir, and the pruner recursively removes directories under it -- that
-  // must never resolve against the process cwd. Matches the daemon resolver.
-  const userDataPath = process.env.ORCA_USER_DATA_PATH || tmpdir()
-  return join(userDataPath, 'shell-wrappers')
+  // Why a truthiness test rather than `??`: a set-but-empty ORCA_USER_DATA_PATH
+  // would leave a relative base dir, and the pruner recursively removes
+  // directories under it -- that must never resolve against the process cwd.
+  const userDataPath = process.env.ORCA_USER_DATA_PATH
+  // Why the fallback is namespaced: os.tmpdir() is a shared world-writable /tmp
+  // on Linux, where a generic `shell-wrappers` is a name any local user can
+  // pre-create and own -- and then swap the .zshrc that ZDOTDIR points at.
+  // Matches the daemon resolver, which already namespaced its fallback.
+  return userDataPath ? join(userDataPath, 'shell-wrappers') : join(tmpdir(), 'orca-shell-wrappers')
 }
 
 // Why memoized: the digest is stable for a given base dir and every shell

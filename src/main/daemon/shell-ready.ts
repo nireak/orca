@@ -19,7 +19,7 @@ import { buildDaemonShellReadyWrapperFiles } from './daemon-shell-ready-wrapper-
 
 const ORCA_USER_DATA_PATH_ENV = 'ORCA_USER_DATA_PATH'
 
-let didEnsureShellReadyWrappers = false
+let didPruneShellReadyWrapperRoots = false
 
 function getShellReadyWrapperBaseDir(): string {
   const userDataPath = process.env[ORCA_USER_DATA_PATH_ENV]
@@ -95,36 +95,43 @@ function ensureShellReadyWrappers(): void {
     return
   }
   const root = getShellReadyWrapperRoot()
-  // Why existence-only is safe now: the root is keyed by a hash of the exact
-  // bytes below, so a tree that is present is a tree this build wrote.
-  if (
-    didEnsureShellReadyWrappers &&
-    shellReadyWrappersExistAt(root, buildDaemonShellReadyWrapperFiles)
-  ) {
-    // Why stamp on the cached path too: this is the branch a long-lived daemon
-    // takes for weeks, and it is the only thing telling a sibling build's
-    // pruner that this tree is still launching shells.
-    markShellReadyWrapperRootInUse(root)
-    return
+  // Why existence alone decides, with no in-process flag: the root is keyed by a
+  // hash of the exact bytes below, so a tree that is present is a tree this build
+  // wrote. Gating on a per-process flag as well meant the first spawn in every
+  // process rewrote an identical tree, replacing a live file on the spawn path
+  // for no gain.
+  if (!shellReadyWrappersExistAt(root, buildDaemonShellReadyWrapperFiles)) {
+    try {
+      writeShellReadyWrappers(root, buildDaemonShellReadyWrapperFiles)
+    } catch (error) {
+      // Why: wrapper file creation can fail due to read-only filesystems, permission
+      // issues, or disk space. Rather than crashing, log the error and continue.
+      // The shell will launch without the wrapper, which means no shell-ready marker
+      // but at least the PTY is usable.
+      const errorMessage =
+        error instanceof Error
+          ? `${error.message} (${(error as NodeJS.ErrnoException).code || 'unknown'})`
+          : String(error)
+      console.error(
+        `[daemon/shell-ready] Failed to create wrapper files in ${root}: ${errorMessage}`
+      )
+      console.error(
+        '[daemon/shell-ready] Shell will launch without wrapper (no shell-ready marker)'
+      )
+      // Why no flag to reset: the next call re-checks the files themselves, so a
+      // partially written tree is retried without any extra bookkeeping.
+      return
+    }
   }
-  didEnsureShellReadyWrappers = true
 
-  try {
-    writeShellReadyWrappers(root, buildDaemonShellReadyWrapperFiles)
+  // Why unconditional: the common path now writes nothing, and this stamp is the
+  // only thing telling a sibling build's pruner the tree still launches shells.
+  markShellReadyWrapperRootInUse(root)
+
+  // Why once: the sweep is per-process startup work, not per-spawn work.
+  if (!didPruneShellReadyWrapperRoots) {
+    didPruneShellReadyWrapperRoots = true
     pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
-  } catch (error) {
-    // Why: wrapper file creation can fail due to read-only filesystems, permission
-    // issues, or disk space. Rather than crashing, log the error and continue.
-    // The shell will launch without the wrapper, which means no shell-ready marker
-    // but at least the PTY is usable.
-    const errorMessage =
-      error instanceof Error
-        ? `${error.message} (${(error as NodeJS.ErrnoException).code || 'unknown'})`
-        : String(error)
-    console.error(`[daemon/shell-ready] Failed to create wrapper files in ${root}: ${errorMessage}`)
-    console.error('[daemon/shell-ready] Shell will launch without wrapper (no shell-ready marker)')
-    // Reset the flag so next attempt will try again
-    didEnsureShellReadyWrappers = false
   }
 }
 

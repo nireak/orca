@@ -182,7 +182,10 @@ function writeTempFileExclusively(tempPath: string, content: string): void {
     if ((error as NodeJS.ErrnoException).code !== 'EEXIST') {
       throw error
     }
-    rmSync(tempPath, { force: true, recursive: true })
+    // Why not recursive: the documented case is a stranded regular file, and a
+    // directory planted here should fail the write loudly rather than authorize
+    // Orca to delete a tree at an attacker-chosen path.
+    rmSync(tempPath, { force: true })
     writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
   }
 }

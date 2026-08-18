@@ -20,7 +20,7 @@ import {
   shellReadyWrappersExist
 } from './local-pty-shell-ready-wrapper-root'
 
-let didEnsureShellReadyWrappers = false
+let didPruneShellReadyWrapperRoots = false
 
 export function getZshShellReadyRcfileContent(): string {
   return buildZshStartupWrapperFiles(getLocalZshWrapperSpec(`${getShellReadyWrapperRoot()}/zsh`))
@@ -28,34 +28,39 @@ export function getZshShellReadyRcfileContent(): string {
 }
 
 export function ensureShellReadyWrappersAt(root = getShellReadyWrapperRoot()): void {
-  // Why existence-only is safe: the default root is keyed by a hash of the exact
-  // bytes we would write, so a tree that is present is a tree this build wrote.
-  if (didEnsureShellReadyWrappers && shellReadyWrappersExist(root)) {
-    // Why stamp on the cached path too: this is the branch taken for the life of
-    // the process, and it is the only thing telling a sibling build's pruner
-    // that this tree is still launching shells.
-    markShellReadyWrapperRootInUse(root)
-    return
-  }
-  didEnsureShellReadyWrappers = true
-
-  try {
-    writeShellReadyWrappers(root, buildLocalShellReadyWrapperFiles)
-    // Why guarded: callers may target an explicit root (tests, snapshots); only
-    // the managed default owns the base dir and may collect siblings there.
-    if (root === getShellReadyWrapperRoot()) {
-      pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
+  // Why existence alone decides, with no in-process flag: the default root is
+  // keyed by a hash of the exact bytes we would write, so a tree that is present
+  // is a tree this build wrote. Gating on a per-process flag as well meant the
+  // first spawn in every process rewrote an identical tree -- replacing a live
+  // file on the terminal-spawn path for no gain, which on Windows is exactly the
+  // collision an indexer or antivirus turns into a blocking rename retry.
+  if (!shellReadyWrappersExist(root)) {
+    try {
+      writeShellReadyWrappers(root, buildLocalShellReadyWrapperFiles)
+    } catch (error) {
+      // Why: degrade gracefully — a failed wrapper (read-only FS, perms, disk) just means no ready marker, PTY stays usable.
+      const errorMessage =
+        error instanceof Error
+          ? `${error.message} (${(error as NodeJS.ErrnoException).code || 'unknown'})`
+          : String(error)
+      console.error(`[shell-ready] Failed to create wrapper files in ${root}: ${errorMessage}`)
+      console.error('[shell-ready] Shell will launch without wrapper (no shell-ready marker)')
+      // Why no flag to reset: the next call re-checks the files themselves, so a
+      // partially written tree is retried without any extra bookkeeping.
+      return
     }
-  } catch (error) {
-    // Why: degrade gracefully — a failed wrapper (read-only FS, perms, disk) just means no ready marker, PTY stays usable.
-    const errorMessage =
-      error instanceof Error
-        ? `${error.message} (${(error as NodeJS.ErrnoException).code || 'unknown'})`
-        : String(error)
-    console.error(`[shell-ready] Failed to create wrapper files in ${root}: ${errorMessage}`)
-    console.error('[shell-ready] Shell will launch without wrapper (no shell-ready marker)')
-    // Reset the flag so next attempt will try again
-    didEnsureShellReadyWrappers = false
+  }
+
+  // Why unconditional: the common path now writes nothing, and this stamp is the
+  // only thing telling a sibling build's pruner the tree still launches shells.
+  markShellReadyWrapperRootInUse(root)
+
+  // Why guarded: callers may target an explicit root (tests, snapshots); only the
+  // managed default owns the base dir and may collect siblings there. Why once:
+  // the sweep is per-process startup work, not per-spawn work.
+  if (!didPruneShellReadyWrapperRoots && root === getShellReadyWrapperRoot()) {
+    didPruneShellReadyWrapperRoots = true
+    pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
   }
 }
 

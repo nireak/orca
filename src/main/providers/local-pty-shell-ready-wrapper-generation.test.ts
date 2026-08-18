@@ -1,8 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { spawnSync } from 'node:child_process'
 import { tmpdir } from 'node:os'
-import { isAbsolute, join } from 'node:path'
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { basename, isAbsolute, join } from 'node:path'
+import { existsSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import {
   describePosix,
   importFreshLocalPtyShellReady,
@@ -17,6 +17,58 @@ import { getZshShellReadyRcfileContent } from './local-pty-shell-ready-wrapper-g
 import { getShellReadyWrapperRoot } from './local-pty-shell-ready-wrapper-root'
 
 restoreUserDataPathAfterEach()
+
+describe('ensureShellReadyWrappersAt', () => {
+  // Why: rewriting a byte-identical tree replaces a live file on the terminal
+  // spawn path for no gain -- and on Windows that is precisely the collision an
+  // indexer or antivirus turns into a blocking rename retry. The tree is
+  // content-addressed, so its presence already proves this build wrote it.
+  it('does not rewrite a tree that is already present', async () => {
+    const userData = mkdtempSync(join(tmpdir(), 'orca-warm-tree-'))
+    try {
+      setTestUserDataPath(userData)
+      const { ensureShellReadyWrappersAt, getShellReadyWrapperRoot: resolveRoot } =
+        await import('./local-pty-shell-ready-wrapper-generation').then(async (generation) => ({
+          ...generation,
+          getShellReadyWrapperRoot: (await import('./local-pty-shell-ready-wrapper-root'))
+            .getShellReadyWrapperRoot
+        }))
+
+      ensureShellReadyWrappersAt()
+      const rcfile = join(resolveRoot(), 'bash', 'rcfile')
+      const firstWrite = statSync(rcfile).mtimeMs
+
+      // A later spawn in the same process, and in a fresh one.
+      ensureShellReadyWrappersAt()
+      vi.resetModules()
+      const fresh = await import('./local-pty-shell-ready-wrapper-generation')
+      fresh.ensureShellReadyWrappersAt()
+
+      expect(statSync(rcfile).mtimeMs).toBe(firstWrite)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+
+  it('regenerates a tree whose files went missing', async () => {
+    const userData = mkdtempSync(join(tmpdir(), 'orca-missing-tree-'))
+    try {
+      setTestUserDataPath(userData)
+      const generation = await import('./local-pty-shell-ready-wrapper-generation')
+      const { getShellReadyWrapperRoot: resolveRoot } =
+        await import('./local-pty-shell-ready-wrapper-root')
+      generation.ensureShellReadyWrappersAt()
+      const rcfile = join(resolveRoot(), 'bash', 'rcfile')
+      rmSync(rcfile)
+
+      generation.ensureShellReadyWrappersAt()
+
+      expect(existsSync(rcfile)).toBe(true)
+    } finally {
+      rmSync(userData, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('shell-ready wrapper root resolution', () => {
   // Why: daemon-entry fork is plain Node (no electron), so the wrapper root resolves from ORCA_USER_DATA_PATH, not app.getPath.
@@ -45,7 +97,11 @@ describe('shell-ready wrapper root resolution', () => {
       setTestUserDataPath(value)
     }
     const { getShellReadyWrapperBaseDir } = await import('./local-pty-shell-ready-wrapper-root')
-    expect(isAbsolute(getShellReadyWrapperBaseDir())).toBe(true)
+    const baseDir = getShellReadyWrapperBaseDir()
+    expect(isAbsolute(baseDir)).toBe(true)
+    // Why the name matters: os.tmpdir() is a shared world-writable /tmp on Linux,
+    // so a generic leaf is a name any local user can pre-create and own.
+    expect(basename(baseDir)).toBe('orca-shell-wrappers')
   })
 })
 
