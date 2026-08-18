@@ -277,10 +277,14 @@ function prepareMacDevElectronApp() {
   if (
     rebuildProcessTable !== null &&
     isDevBundleInUse(distDir, rebuildProcessTable) &&
-    existsSync(executablePath)
+    // Why the same completeness check the cache path uses: a bundle missing Chromium's resources
+    // blank-crashes, and its orphaned crashpad helper still matches the process table -- so without
+    // this the runner would reuse a broken bundle forever and never be able to rebuild itself out.
+    existsSync(executablePath) &&
+    requiredResourcePaths.every((resourcePath) => existsSync(resourcePath))
   ) {
     console.warn(
-      `[orca-dev] Another dev instance is running from this bundle; reusing it instead of rebuilding.`
+      `[orca-dev] Another dev instance is running from this bundle; reusing it instead of rebuilding. Quit the other instance (or delete ${distDir}) to force a rebuild.`
     )
     process.env.ELECTRON_EXEC_PATH = executablePath
     return
