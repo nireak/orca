@@ -31,6 +31,19 @@ describe('Git capability execution-host state', () => {
     )
   })
 
+  // A stale hint used to rename the host, filing results from the distro that ran
+  // git against one that never did.
+  it('files state against the distro in the cwd, not a hint naming another one', () => {
+    const cwd = String.raw`\\wsl.localhost\Ubuntu\home\user\repo`
+
+    expect(getLocalGitCapabilityCache({ cwd, wslDistro: 'Debian' })).toBe(
+      getLocalGitCapabilityCache({ cwd })
+    )
+    expect(getLocalGitCapabilityCache({ cwd, wslDistro: 'Debian' })).not.toBe(
+      getLocalGitCapabilityCache({ wslDistro: 'Debian' })
+    )
+  })
+
   it('shares one SSH provider lifetime without leaking into a replacement provider', () => {
     const provider = {}
     const replacementProvider = {}

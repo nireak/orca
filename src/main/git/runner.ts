@@ -34,6 +34,7 @@ import {
   gitCredentialPromptGuardEnv
 } from '../../shared/git-credential-prompt-env'
 import { getSpawnArgsForWindows, isWindowsBatchScript, resolveWindowsCommand } from '../win32-utils'
+import { gitExecutionHostForTarget } from './git-execution-host'
 import {
   buildWslExecArgs,
   buildWslLoginShellCommand,
@@ -413,7 +414,8 @@ function wslDistroForCommand(cwd: string | undefined, override?: string): string
   if (process.platform !== 'win32') {
     return null
   }
-  return (cwd ? parseWslPath(cwd)?.distro : undefined) ?? override ?? null
+  const host = gitExecutionHostForTarget({ cwd, wslDistro: override })
+  return host.kind === 'wsl' ? host.distro : null
 }
 
 function resolveGitCommand(

@@ -1,5 +1,5 @@
 import { GitCapabilityCache } from '../../shared/git-capability-cache'
-import { parseWslUncPath } from '../../shared/wsl-paths'
+import { gitExecutionHostForTarget, gitExecutionHostKey } from './git-execution-host'
 import {
   isWslLinkedWorktreeGitRoutingCandidate,
   prepareWslLinkedWorktreeGitRouting
@@ -17,9 +17,7 @@ const localCapabilitiesByExecutionHost = new Map<string, GitCapabilityCache>()
 let sshCapabilitiesByProvider = new WeakMap<object, GitCapabilityCache>()
 
 function getLocalGitExecutionHostKey(target: LocalGitCapabilityTarget): string {
-  const wslDistro =
-    target.wslDistro ?? (target.cwd ? parseWslUncPath(target.cwd)?.distro : undefined)
-  return wslDistro ? `wsl:${wslDistro}` : 'local'
+  return gitExecutionHostKey(gitExecutionHostForTarget(target))
 }
 
 export function getLocalGitCapabilityCache(
