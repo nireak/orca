@@ -232,15 +232,19 @@ function prepareMacDevElectronApp() {
     2
   )
   const executablePath = path.join(appPath, 'Contents', 'MacOS', 'Electron')
+  // Split by consequence: without this Chromium blank-crashes, so it gates whether the bundle can
+  // run at all. The keyboard-layout helper below is optional -- swiftc builds it non-fatally, so on
+  // a Mac without full Xcode it is simply absent and only a keyboard feature degrades.
+  const chromiumResourcePath = path.join(
+    appPath,
+    'Contents',
+    'Frameworks',
+    'Electron Framework.framework',
+    'Resources',
+    'icudtl.dat'
+  )
   const requiredResourcePaths = [
-    path.join(
-      appPath,
-      'Contents',
-      'Frameworks',
-      'Electron Framework.framework',
-      'Resources',
-      'icudtl.dat'
-    ),
+    chromiumResourcePath,
     path.join(appPath, 'Contents', 'MacOS', 'orca-keyboard-layout')
   ]
 
@@ -277,11 +281,13 @@ function prepareMacDevElectronApp() {
   if (
     rebuildProcessTable !== null &&
     isDevBundleInUse(distDir, rebuildProcessTable) &&
-    // Why the same completeness check the cache path uses: a bundle missing Chromium's resources
-    // blank-crashes, and its orphaned crashpad helper still matches the process table -- so without
-    // this the runner would reuse a broken bundle forever and never be able to rebuild itself out.
+    // Why a runnability check: a bundle missing Chromium's resources blank-crashes, and its
+    // orphaned crashpad helper still matches the process table -- so without this the runner would
+    // reuse a broken bundle forever and never rebuild itself out. Deliberately narrower than
+    // copiedAppIsUsable, which also demands the optional keyboard-layout helper: gating on that
+    // would strand every Mac without swiftc back on the rmSync path this guard exists to avoid.
     existsSync(executablePath) &&
-    requiredResourcePaths.every((resourcePath) => existsSync(resourcePath))
+    existsSync(chromiumResourcePath)
   ) {
     console.warn(
       `[orca-dev] Another dev instance is running from this bundle; reusing it instead of rebuilding. Quit the other instance (or delete ${distDir}) to force a rebuild.`
