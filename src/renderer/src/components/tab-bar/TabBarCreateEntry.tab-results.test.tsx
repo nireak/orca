@@ -77,7 +77,7 @@ const tabSearchMock = vi.hoisted(() => {
             titleSearchText: row.title,
             secondarySearchTexts: row.relativePath ? [row.relativePath] : [],
             document: buildPaletteTabDocument({
-              id: row.tabId ?? 'tab',
+              id: row.tabId ?? row.title,
               title: row.title,
               secondaryTexts: row.relativePath ? [row.relativePath] : [],
               worktreeName: worktree.displayName,
@@ -145,6 +145,7 @@ function terminalResult(overrides: Partial<OpenTabSearchResult> = {}): OpenTabSe
     entityId: 'term-1',
     groupId: 'g',
     relativePath: null,
+    occupantAgent: null,
     ...overrides
   } as OpenTabSearchResult
 }

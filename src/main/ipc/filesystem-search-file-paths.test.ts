@@ -112,6 +112,27 @@ describe('searchQuickOpenFilePaths', () => {
     expect(child.kill).toHaveBeenCalledOnce()
   })
 
+  it('reports truncation when matches exceed the result limit', async () => {
+    const child = createMockProcess()
+    wslAwareSpawnMock.mockReturnValue(child)
+    const promise = searchQuickOpenFilePaths('/repo', {} as Store, {
+      query: 'target',
+      limit: 1
+    })
+    await flushMicrotasks()
+
+    ;(child.stdout as unknown as EventEmitter).emit(
+      'data',
+      'src/target-alpha.ts\nsrc/target-beta.ts\n'
+    )
+    child.emit('close', 0, null)
+
+    const result = await promise
+    expect(result.paths).toHaveLength(1)
+    expect(result.totalCount).toBe(2)
+    expect(result.truncated).toBe(true)
+  })
+
   it('requires ripgrep instead of retaining an unbounded fallback inventory', async () => {
     getLocalGitOptionsForRegisteredWorktreeMock.mockReturnValue({ wslDistro: 'Ubuntu' })
     checkRgAvailableMock.mockResolvedValue(false)

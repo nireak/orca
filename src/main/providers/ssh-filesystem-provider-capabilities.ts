@@ -9,14 +9,14 @@ export function probeSshQuickOpenSearchCapability(
   signal?: AbortSignal
 ): Promise<boolean> {
   const cached = quickOpenSearchSupport.get(mux)
-  const probe =
-    cached ??
-    mux
+  let probe = cached
+  if (!probe) {
+    probe = mux
       .request('fs.getCapabilities', undefined, { timeoutMs: 5_000 })
       .then((result) => {
         const version = (result as { quickOpenSearchVersion?: unknown } | null)
           ?.quickOpenSearchVersion
-        return version === 1
+        return typeof version === 'number' && Number.isInteger(version) && version >= 1
       })
       .catch((error) => {
         if (isMethodNotFoundError(error)) {
@@ -24,16 +24,13 @@ export function probeSshQuickOpenSearchCapability(
         }
         throw error
       })
-  if (!cached) {
+      .catch((error) => {
+        if (quickOpenSearchSupport.get(mux) === probe) {
+          quickOpenSearchSupport.delete(mux)
+        }
+        throw error
+      })
     quickOpenSearchSupport.set(mux, probe)
   }
-  return waitForSshCapabilityProbe(probe, signal).then(
-    (supported) => supported,
-    (error) => {
-      if (!signal?.aborted && quickOpenSearchSupport.get(mux) === probe) {
-        quickOpenSearchSupport.delete(mux)
-      }
-      throw error
-    }
-  )
+  return waitForSshCapabilityProbe(probe, signal)
 }

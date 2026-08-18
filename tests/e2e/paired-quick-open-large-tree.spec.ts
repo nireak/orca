@@ -185,9 +185,10 @@ test('finds paths beyond the old prefix on a headless paired runtime', async (//
 {}, testInfo) => {
   test.setTimeout(240_000)
   const fixture = createPairedQuickOpenLargeTreeFixture()
-  const host = await launchHeadlessPairedRuntimeHost()
+  let host: Awaited<ReturnType<typeof launchHeadlessPairedRuntimeHost>> | null = null
   let client: PairedElectronClient | null = null
   try {
+    host = await launchHeadlessPairedRuntimeHost()
     const added = await host.client.call<{ repo: { id: string } }>('repo.add', {
       path: fixture.root,
       kind: 'git'
@@ -202,7 +203,7 @@ test('finds paths beyond the old prefix on a headless paired runtime', async (//
     await expectQuickOpenAndRuntimeHealthy(client, worktreeId, fixture)
   } finally {
     await client?.dispose()
-    await host.dispose()
+    await host?.dispose()
     fixture.dispose()
   }
 })
