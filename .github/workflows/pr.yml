@@ -497,6 +497,38 @@ jobs:
       - name: Smoke packaged hang watchdog worker
         run: xvfb-run --auto-servernum node config/scripts/smoke-packaged-hang-watchdog-worker.mjs --app-dir=dist/linux-unpacked
 
+  windows_pty_behaviour:
+    name: windows pty behaviour
+    runs-on: windows-2022
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          filter: blob:none
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version-file: package.json
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Why a dedicated lane: these specs spawn a real ConPTY and assert the bytes it
+      # emits. They are skipped on every other runner, so without this job they never
+      # execute anywhere and silently pass as skips.
+      - name: Windows pty specs
+        run: npx vitest --config config/vitest.config.ts run src/main/providers/windows-conpty-wide-char-duplication.node-pty.test.ts src/shared/windows-conpty-backend-selection.test.ts
+
   package_windows:
     name: package (windows)
     runs-on: windows-2022
@@ -653,6 +685,7 @@ jobs:
       - managed_hook_node18
       - package
       - package_windows
+      - windows_pty_behaviour
     runs-on: ubuntu-latest
 
     steps:
@@ -676,6 +709,7 @@ jobs:
           MANAGED_HOOK_NODE18: ${{ needs.managed_hook_node18.result }}
           PACKAGE: ${{ needs.package.result }}
           PACKAGE_WINDOWS: ${{ needs.package_windows.result }}
+          WINDOWS_PTY_BEHAVIOUR: ${{ needs.windows_pty_behaviour.result }}
         run: |
           for result in \
             "$STATIC_ANALYSIS" \
@@ -687,7 +721,8 @@ jobs:
             "$TEST" \
             "$MANAGED_HOOK_NODE18" \
             "$PACKAGE" \
-            "$PACKAGE_WINDOWS"; do
+            "$PACKAGE_WINDOWS" \
+            "$WINDOWS_PTY_BEHAVIOUR"; do
             if [ "$result" != "success" ]; then
               exit 1
             fi
