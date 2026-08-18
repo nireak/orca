@@ -3,6 +3,10 @@ import { existsSync, accessSync, statSync, chmodSync, constants as fsConstants }
 import type * as pty from 'node-pty'
 import { wrapShellSpawnForMacosTccAttribution } from './macos-tcc-login-shell'
 import { formatLocalPtyEnvironmentDiag } from './working-directory-validation'
+import {
+  windowsConptySpawnOptions,
+  type WindowsConptySpawnOptions
+} from '../../shared/windows-conpty-backend-selection'
 
 export {
   formatLocalPtyEnvironmentDiag,
@@ -159,8 +163,8 @@ export type ShellSpawnResult = {
 // has the modern wrap-marker behavior xterm expects; legacy system ConPTY can
 // corrupt full-width TUI rows in scrollback. Without this, degraded-mode and
 // fresh-local spawns silently behave differently from daemon terminals.
-function windowsConptyDllOptions(): { useConptyDll: true } | Record<string, never> {
-  return process.platform === 'win32' ? { useConptyDll: true } : {}
+function windowsConptyDllOptions(): WindowsConptySpawnOptions {
+  return windowsConptySpawnOptions()
 }
 
 function spawnWindowsFallbackChain(

@@ -1,5 +1,6 @@
 import os from 'node:os'
 import * as pty from 'node-pty'
+import { windowsConptySpawnOptions } from '../../shared/windows-conpty-backend-selection'
 
 const WARMUP_KILL_TIMEOUT_MS = 10_000
 
@@ -25,7 +26,7 @@ export function warmWindowsConptyOnce(spawnPty: typeof pty.spawn = pty.spawn): v
         env: process.env as Record<string, string>,
         // Match real terminal spawns so the bundled ConPTY binaries are the
         // ones warmed, not the legacy system ConPTY.
-        useConptyDll: true
+        ...windowsConptySpawnOptions()
       })
       const killTimer = setTimeout(() => {
         try {
