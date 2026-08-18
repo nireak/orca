@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { mkdtempSync, mkdirSync, readFileSync, readdirSync, existsSync, utimesSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  utimesSync,
+  writeFileSync
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
@@ -95,6 +103,28 @@ describe('pruneStaleShellReadyWrapperRoots', () => {
     pruneStaleShellReadyWrapperRoots(base, keepRoot)
 
     expect(existsSync(staleDir)).toBe(false)
+    expect(shellReadyWrappersExistAt(keepRoot, build)).toBe(true)
+  })
+
+  // Why: older builds still write the unversioned `<userData>/shell-ready/` tree
+  // and long-lived daemons launch shells from it. The pruner walks a different
+  // base dir and must never be able to reach it, however old it looks.
+  it('cannot reach the legacy unversioned tree older daemons still depend on', () => {
+    const userData = makeBase()
+    const legacyZshrc = join(userData, 'shell-ready', 'zsh', '.zshrc')
+    mkdirSync(dirname(legacyZshrc), { recursive: true })
+    writeFileSync(legacyZshrc, 'tree an older daemon is still launching shells from')
+    const ancient = new Date(Date.now() - 400 * DAY_MS)
+    utimesSync(join(userData, 'shell-ready'), ancient, ancient)
+
+    const base = join(userData, 'shell-wrappers')
+    const build = builderFor('a')
+    const keepRoot = resolveShellReadyWrapperRoot(base, build)
+    writeShellReadyWrappers(keepRoot, build)
+
+    pruneStaleShellReadyWrapperRoots(base, keepRoot)
+
+    expect(existsSync(legacyZshrc)).toBe(true)
     expect(shellReadyWrappersExistAt(keepRoot, build)).toBe(true)
   })
 
