@@ -17,6 +17,7 @@ import net from 'node:net'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { prepareDevCliTerminalWrappers } from './dev-cli-terminal-wrapper.mjs'
+import { selectStaleDevBundleDirs } from './dev-electron-bundle-cache.mjs'
 import {
   DEV_BUNDLE_ID,
   getDevBundlePlistPatches,
@@ -115,6 +116,48 @@ function sanitizeMacAppBundleName(value) {
   )
 }
 
+function getLiveDevBundlePaths() {
+  // One `ps` for every instance, rather than one probe per directory. Not pgrep: macOS pgrep has no
+  // -a (that is a Linux procps extension) and silently prints bare PIDs, which would read as
+  // "nothing is running" and delete a live bundle. -ww prevents the command column being truncated.
+  try {
+    return execFileSync('/bin/ps', ['-Awwo', 'command='], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+      timeout: 5000
+    })
+      .split('\n')
+      .flatMap((line) => line.match(/\/\S*\/out\/electron-dev\/[^\s/]+/g) ?? [])
+  } catch {
+    // Treating a failure as "nothing live" would risk deleting a running bundle, so skip pruning.
+    return null
+  }
+}
+
+function pruneStaleDevBundles(distDir) {
+  const root = path.dirname(distDir)
+  let dirs
+  try {
+    dirs = readdirSync(root, { withFileTypes: true })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => path.join(root, entry.name))
+  } catch {
+    return
+  }
+  if (dirs.length <= 1) {
+    return
+  }
+  const livePaths = getLiveDevBundlePaths()
+  if (livePaths === null) {
+    return
+  }
+  for (const dir of selectStaleDevBundleDirs({ dirs, currentDir: distDir, livePaths })) {
+    try {
+      rmSync(dir, { recursive: true, force: true })
+    } catch {}
+  }
+}
+
 function prepareMacDevElectronApp() {
   if (process.platform !== 'darwin') {
     return
@@ -209,6 +252,7 @@ function prepareMacDevElectronApp() {
   }
 
   if (copiedAppIsUsable()) {
+    pruneStaleDevBundles(distDir)
     process.env.ELECTRON_EXEC_PATH = executablePath
     return
   }
@@ -290,14 +334,24 @@ function prepareMacDevElectronApp() {
   // An ad-hoc re-sign restores delivery, the permission prompt, and the
   // notification-settings deep link for dev builds. Non-fatal: a signing
   // failure should not block `pnpm dev`.
+  let signed = true
   try {
     execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', appPath])
   } catch (error) {
+    signed = false
     console.warn(
       `[orca-dev] ad-hoc codesign failed (dev notifications will not deliver): ${error?.message ?? error}`
     )
   }
-  writeFileSync(markerPath, expectedMarker, 'utf8')
+  // Why only when signed: the marker is what marks this bundle reusable. Writing it after a failed
+  // sign cached an unsigned bundle permanently -- the warning above scrolled past once and every
+  // later launch silently reused it, losing notification delivery and the stable cdhash that keeps
+  // safeStorage from re-prompting. Leaving it unwritten costs a re-copy per launch until signing
+  // works, and still does not block `pnpm dev`.
+  if (signed) {
+    writeFileSync(markerPath, expectedMarker, 'utf8')
+  }
+  pruneStaleDevBundles(distDir)
   process.env.ELECTRON_EXEC_PATH = executablePath
 }
 
