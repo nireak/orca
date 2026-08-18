@@ -527,7 +527,12 @@ jobs:
       # emits. They are skipped on every other runner, so without this job they never
       # execute anywhere and silently pass as skips.
       - name: Windows pty specs
-        run: npx vitest --config config/vitest.config.ts run src/main/providers/windows-conpty-wide-char-duplication.node-pty.test.ts src/shared/windows-conpty-backend-selection.test.ts
+        run: >-
+          npx vitest --config config/vitest.config.ts run
+          src/main/providers/windows-conpty-wide-char-duplication.node-pty.test.ts
+          src/main/providers/pty-repaint-wide-char-buffer.node-pty.test.ts
+          src/main/daemon/headless-emulator-wide-char-repaint.test.ts
+          src/shared/windows-conpty-backend-selection.test.ts
 
   package_windows:
     name: package (windows)
