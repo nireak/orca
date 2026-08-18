@@ -9,7 +9,7 @@ import {
   writeFileSync
 } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, sep } from 'node:path'
 import {
   pruneStaleShellReadyWrapperRoots,
   markShellReadyWrapperRootInUse,
@@ -54,7 +54,10 @@ describe('resolveShellReadyWrapperRoot', () => {
   // makes a wrapper source itself until zsh hits its recursion limit.
   it('keeps the zsh dir ending in /shell-ready/zsh', () => {
     const root = resolveShellReadyWrapperRoot(makeBase(), builderFor('a'))
-    expect(join(root, 'zsh').endsWith('/shell-ready/zsh')).toBe(true)
+    // Compare in POSIX form: the guards match a POSIX suffix, and the value they
+    // see is built with POSIX concatenation regardless of the host separator.
+    const zshDir = join(root, 'zsh').split(sep).join('/')
+    expect(zshDir.endsWith('/shell-ready/zsh')).toBe(true)
   })
 })
 

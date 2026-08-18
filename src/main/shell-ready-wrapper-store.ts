@@ -17,7 +17,6 @@ import {
   lstatSync,
   mkdirSync,
   readdirSync,
-  renameSync,
   rmSync,
   statSync,
   utimesSync,
@@ -25,6 +24,7 @@ import {
   type Dirent
 } from 'node:fs'
 import { dirname, join } from 'node:path'
+import { renameFileWithWindowsRetry } from './codex-accounts/fs-utils'
 
 /** One wrapper file, addressed relative to its tree root (e.g. `zsh/.zshrc`). */
 export type ShellReadyWrapperFile = { relativePath: string; content: string }
@@ -70,8 +70,23 @@ export function resolveShellReadyWrapperRoot(
   return join(baseDir, digest.digest('hex').slice(0, ROOT_HASH_LENGTH), WRAPPER_ROOT_LEAF)
 }
 
+// Why memoized: the existence check runs on every terminal spawn once the tree
+// is warm, and building the set to read five constant file names regenerates
+// ~29KB of shell templates that are then thrown away. The names do not depend on
+// the root, so one probe build per builder is enough.
+const relativePathsByBuilder = new WeakMap<ShellReadyWrapperBuilder, readonly string[]>()
+
+function getShellReadyWrapperRelativePaths(build: ShellReadyWrapperBuilder): readonly string[] {
+  let relativePaths = relativePathsByBuilder.get(build)
+  if (!relativePaths) {
+    relativePaths = build(HASH_PROBE_ROOT).map((file) => file.relativePath)
+    relativePathsByBuilder.set(build, relativePaths)
+  }
+  return relativePaths
+}
+
 export function getShellReadyWrapperPaths(root: string, build: ShellReadyWrapperBuilder): string[] {
-  return build(root).map((file) => join(root, file.relativePath))
+  return getShellReadyWrapperRelativePaths(build).map((relativePath) => join(root, relativePath))
 }
 
 export function shellReadyWrappersExistAt(root: string, build: ShellReadyWrapperBuilder): boolean {
@@ -181,7 +196,11 @@ function writeWrapperFileAtomically(path: string, content: string): void {
     writeTempFileExclusively(tempPath, content)
     // Why chmod anyway: the mode passed to open() is masked by umask.
     chmodSync(tempPath, 0o644)
-    renameSync(tempPath, path)
+    // Why the retry wrapper: on Windows an indexer or antivirus can hold the
+    // destination open and the rename fails with EPERM/EACCES/EBUSY. The first
+    // ensure in every process rewrites an existing tree, so this replaces a live
+    // file on the terminal-spawn path.
+    renameFileWithWindowsRetry(tempPath, path)
   } catch (error) {
     rmSync(tempPath, { force: true })
     throw error
