@@ -389,6 +389,13 @@ import {
 import type { SshConnectionState } from '../../shared/ssh-types'
 import { getPublicSshState } from './public-ssh-state'
 import { closeTerminalTabInWorkspaceSession } from '../../shared/workspace-session-terminal-tab-close'
+import {
+  describeTerminalExitCause,
+  isDeliberateTerminalExit,
+  OPERATOR_CLOSE_EXIT_CAUSE,
+  resolveProcessExitCause,
+  type TerminalExitCause
+} from '../../shared/terminal-exit-cause'
 import type {
   LinearCurrentIssueContextHints,
   LinearAttachResult,
@@ -1419,6 +1426,7 @@ type RuntimeLeafRecord = RuntimeSyncedLeaf & {
   writable: boolean
   lastOutputAt: number | null
   lastExitCode: number | null
+  lastExitCause: TerminalExitCause | null
   tailBuffer: string[]
   tailTranscriptBuffer: string[]
   tailTranscriptChars: number
@@ -1471,6 +1479,7 @@ type RuntimePtyWorktreeRecord = {
   connected: boolean
   disconnectedAt: number | null
   lastExitCode: number | null
+  lastExitCause: TerminalExitCause | null
   lastAgentStatus: AgentStatus | null
   /** False until a live OSC frame sets the status; restore seeds never set it. */
   lastAgentStatusObservedLive: boolean
@@ -3138,6 +3147,9 @@ export class OrcaRuntimeService {
   private ptyForegroundAgentRefreshes = new Map<string, PtyForegroundAgentRefresh>()
   private ptyForegroundProcessReads = new Map<string, PtyForegroundProcessReadEntry>()
   private ptyDelayedForegroundSnapshotTitleObservations = new Map<string, number>()
+  // Why a set and not a timer: the intent is retired by the exit it explains, or
+  // by the next spawn on that id (advancePtyLifecycleGeneration).
+  private readonly stopRequestedPtyIds = new Set<string>()
   private _orchestrationDb: OrchestrationDb | null = null
   private messageWaitersByHandle = new Map<string, Set<MessageWaiter>>()
   private readonly orchestrationMailboxOwner = new OrchestrationMailboxOwner({
@@ -6747,6 +6759,7 @@ export class OrcaRuntimeService {
         writable: this.graphStatus === 'ready' && ptyId !== null,
         lastOutputAt: tailSource?.lastOutputAt ?? null,
         lastExitCode: tailSource?.lastExitCode ?? null,
+        lastExitCause: tailSource?.lastExitCause ?? null,
         tailBuffer: tailSource?.tailBuffer ?? [],
         tailTranscriptBuffer: tailSource?.tailTranscriptBuffer ?? [],
         tailTranscriptChars: tailSource?.tailTranscriptChars ?? 0,
@@ -15024,12 +15037,18 @@ export class OrcaRuntimeService {
     ptyId: string,
     exitCode: number,
     exitIncarnationId?: PtyIncarnationId,
-    options?: { hostExitConfirmed?: boolean }
+    options?: { hostExitConfirmed?: boolean; cause?: TerminalExitCause }
   ): void {
     const pty = this.ptysById.get(ptyId)
     if (exitIncarnationId && pty?.incarnationId && exitIncarnationId !== pty.incarnationId) {
       return
     }
+    // Why intent first: a requested stop can still be delivered by the provider's
+    // own exit event, whose status looks exactly like a natural finish.
+    const exitCause: TerminalExitCause = this.stopRequestedPtyIds.has(ptyId)
+      ? OPERATOR_CLOSE_EXIT_CAUSE
+      : (options?.cause ?? resolveProcessExitCause({ exitCode }))
+    this.stopRequestedPtyIds.delete(ptyId)
     const preservesAbnormalSshSurface =
       this.isSshOwnedPtyId(ptyId) &&
       pty?.connectionId != null &&
@@ -15172,6 +15191,7 @@ export class OrcaRuntimeService {
       this.setPairedRendererSessionOwnership(pty.ptyId, false)
       pty.disconnectedAt = Date.now()
       pty.lastExitCode = exitCode
+      pty.lastExitCause = exitCause
       if (exitCode >= 0 || options?.hostExitConfirmed === true) {
         // A real wait status from the owning host is the death certificate; the
         // synthetic -1 we emit on a failed/unroutable stop is not.
@@ -15194,15 +15214,31 @@ export class OrcaRuntimeService {
       this.retireMobileSessionSurfacesForPty(ptyId, incarnationId, exactSurfaces)
     }
 
+    const exitedSurfaces: { handle: string; paneKey: string | null }[] = []
     for (const leaf of this.getLeavesForPty(ptyId)) {
       this.detachedPreAllocatedLeaves.delete(ptyId)
       leaf.connected = false
       leaf.writable = false
       leaf.lastExitCode = exitCode
+      leaf.lastExitCause = exitCause
       leaf.lastAgentStatusObservedLive = false
       this.resolveExitWaiters(leaf)
-      if (!preservesAbnormalSshSurface) {
-        this.failActiveDispatchOnExit(leaf, exitCode)
+      const leafHandle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
+      if (leafHandle) {
+        exitedSurfaces.push({ handle: leafHandle, paneKey: `${leaf.tabId}:${leaf.leafId}` })
+      }
+    }
+    // Why: an explicit whole-tab close drops the leaf from the graph *before*
+    // this exit lands, so a leaf-only walk found nothing and left the dispatch
+    // reading 'dispatched' forever against a dead process. The PTY's own handle
+    // and pane key survive that teardown, so settle from them too (STA-4603).
+    const ptyHandle = this.handleByPtyId.get(ptyId)
+    if (ptyHandle && !exitedSurfaces.some((surface) => surface.handle === ptyHandle)) {
+      exitedSurfaces.push({ handle: ptyHandle, paneKey: pty?.paneKey ?? null })
+    }
+    if (!preservesAbnormalSshSurface) {
+      for (const surface of exitedSurfaces) {
+        this.failActiveDispatchOnExit(surface.handle, surface.paneKey, exitCause)
       }
     }
     this.pruneDisconnectedPtyRecords()
@@ -16814,23 +16850,36 @@ export class OrcaRuntimeService {
   // dispatch contexts immediately, rather than waiting for the coordinator's
   // next poll cycle. This catches agent crashes and unexpected exits within
   // milliseconds. The task is set back to 'pending' so it can be re-dispatched.
-  private failActiveDispatchOnExit(leaf: RuntimeLeafRecord, exitCode: number): void {
+  private failActiveDispatchOnExit(
+    handle: string,
+    paneKey: string | null,
+    cause: TerminalExitCause
+  ): void {
     if (!this._orchestrationDb) {
       return
     }
 
-    const handle = this.handleByLeafKey.get(this.getLeafKey(leaf.tabId, leaf.leafId))
-    if (!handle) {
-      return
-    }
-
-    const dispatch = this._orchestrationDb.getActiveDispatchForTerminal(handle)
+    // Why the pane key too: a reminted handle no longer matches the row, but the
+    // pane identity behind it outlives the remint.
+    const dispatch = this._orchestrationDb.getActiveDispatchForTerminal(
+      handle,
+      paneKey ?? undefined
+    )
     if (!dispatch) {
       return
     }
 
-    const errorContext = `Agent exited with code ${exitCode}`
-    this._orchestrationDb.failDispatch(dispatch.id, errorContext, { workerProcessExited: true })
+    const errorContext = describeTerminalExitCause(cause)
+    this._orchestrationDb.failDispatch(dispatch.id, errorContext, {
+      workerProcessExited: true,
+      terminationReason: cause.kind
+    })
+
+    // Why: a deliberate close is not an incident. Escalating it trains
+    // coordinators to ignore the channel that should wake them for a real one.
+    if (isDeliberateTerminalExit(cause)) {
+      return
+    }
 
     // Why: create an escalation message so the coordinator is notified about
     // the unexpected exit on its next check cycle, even if the circuit breaker
@@ -16840,12 +16889,12 @@ export class OrcaRuntimeService {
       this._orchestrationDb.insertMessage({
         from: handle,
         to: run.coordinator_handle,
-        subject: `Agent exited unexpectedly (code ${exitCode})`,
+        subject: `Agent exited unexpectedly (${errorContext})`,
         type: 'escalation',
         priority: 'high',
         payload: JSON.stringify({
           taskId: dispatch.task_id,
-          exitCode,
+          exitCause: cause,
           handle
         })
       })
@@ -17945,6 +17994,23 @@ export class OrcaRuntimeService {
 
   markPtyLivenessLive(ptyId: string): void {
     this.rememberPtyLivenessVerdict(ptyId, { status: 'live', ptyIds: [ptyId] })
+  }
+
+  /**
+   * Records that Orca asked this PTY to stop — a close, a stop, a teardown.
+   *
+   * Why before the kill and not at the exit: a requested stop can still be
+   * delivered by the provider's own exit event, which carries a process status
+   * indistinguishable from a natural finish. The intent is the only thing that
+   * separates "the operator closed it" from "the agent died", so it is recorded
+   * where it is known rather than reconstructed afterwards (STA-4603).
+   */
+  markPtyStopRequested(ptyId: string): void {
+    this.stopRequestedPtyIds.add(ptyId)
+  }
+
+  isPtyStopRequested(ptyId: string): boolean {
+    return this.stopRequestedPtyIds.has(ptyId)
   }
 
   /** Null when nothing has been observed either way, so callers keep their own default. */
@@ -29140,6 +29206,10 @@ export class OrcaRuntimeService {
     let addressedPtyStopped = false
     const deadlineMs = Date.now() + EXPLICIT_TERMINAL_CLOSE_STOP_TIMEOUT_MS
     for (const ptyId of ptyIds) {
+      // Why here: this is the single funnel for an explicit close, and the
+      // intent must be on record before the stop, since the provider may report
+      // the exit itself with a status that reads like a natural finish.
+      this.markPtyStopRequested(ptyId)
       let stopped = false
       if (this.ptyController?.stopAndWait) {
         try {
@@ -31880,6 +31950,7 @@ export class OrcaRuntimeService {
         connected: state.connected ?? true,
         disconnectedAt: state.connected === false ? Date.now() : null,
         lastExitCode: null,
+        lastExitCause: null,
         lastAgentStatus: null,
         lastAgentStatusObservedLive: false,
         lastAgentStatusStartedAtEpochMs: null,
@@ -32538,6 +32609,7 @@ export class OrcaRuntimeService {
       writable: provenAbsent ? false : leaf.writable,
       lastOutputAt: leaf.lastOutputAt,
       preview: leaf.preview,
+      ...(leaf.lastExitCause ? { exitCause: leaf.lastExitCause } : {}),
       ...this.terminalExecutionHostField(leaf.ptyId, leaf.worktreeId)
     }
   }
@@ -34496,6 +34568,7 @@ export class OrcaRuntimeService {
       writable: pty.connected,
       lastOutputAt: pty.lastOutputAt,
       preview: pty.preview,
+      ...(pty.lastExitCause ? { exitCause: pty.lastExitCause } : {}),
       ...this.terminalExecutionHostField(pty.ptyId, pty.worktreeId)
     }
   }
@@ -39574,7 +39647,14 @@ function buildTerminalWaitResult(
   condition: RuntimeTerminalWaitCondition,
   leaf: RuntimeLeafRecord
 ): RuntimeTerminalWait {
-  return buildTerminalWait(handle, condition, getTerminalState(leaf), leaf.lastExitCode)
+  return buildTerminalWait(
+    handle,
+    condition,
+    getTerminalState(leaf),
+    leaf.lastExitCode,
+    undefined,
+    leaf.lastExitCause
+  )
 }
 
 function buildTerminalWaitBlockedResult(
@@ -39588,7 +39668,8 @@ function buildTerminalWaitBlockedResult(
     condition,
     getTerminalState(leaf),
     leaf.lastExitCode,
-    blockedReason
+    blockedReason,
+    leaf.lastExitCause
   )
 }
 
@@ -39597,7 +39678,14 @@ function buildPtyTerminalWaitResult(
   condition: RuntimeTerminalWaitCondition,
   pty: RuntimePtyWorktreeRecord
 ): RuntimeTerminalWait {
-  return buildTerminalWait(handle, condition, getPtyTerminalState(pty), pty.lastExitCode)
+  return buildTerminalWait(
+    handle,
+    condition,
+    getPtyTerminalState(pty),
+    pty.lastExitCode,
+    undefined,
+    pty.lastExitCause
+  )
 }
 
 function buildPtyTerminalWaitBlockedResult(
@@ -39611,7 +39699,8 @@ function buildPtyTerminalWaitBlockedResult(
     condition,
     getPtyTerminalState(pty),
     pty.lastExitCode,
-    blockedReason
+    blockedReason,
+    pty.lastExitCause
   )
 }
 
@@ -39620,7 +39709,8 @@ function buildTerminalWait(
   condition: RuntimeTerminalWaitCondition,
   status: RuntimeTerminalState,
   exitCode: number | null,
-  blockedReason?: RuntimeTerminalWaitBlockedReason
+  blockedReason?: RuntimeTerminalWaitBlockedReason,
+  exitCause?: TerminalExitCause | null
 ): RuntimeTerminalWait {
   return {
     handle,
@@ -39628,6 +39718,7 @@ function buildTerminalWait(
     satisfied: blockedReason === undefined,
     status,
     exitCode,
+    ...(exitCause ? { exitCause } : {}),
     ...(blockedReason ? { blockedReason } : {})
   }
 }

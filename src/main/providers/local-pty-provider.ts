@@ -91,6 +91,7 @@ import {
   expandWindowsEnvironmentVariables,
   expandWindowsPathEnvironmentVariables
 } from '../../shared/windows-environment-expansion'
+import { resolveProcessExitCause, type TerminalExitCause } from '../../shared/terminal-exit-cause'
 
 const PANE_IDENTITY_ENV_KEYS = [
   'ORCA_PANE_KEY',
@@ -131,6 +132,9 @@ const ptyExitDisposables = new Map<string, { dispose: () => void }>()
 const ptyCleanupCallbacks = new Map<string, () => void>()
 const ptyTerminationMode = new Map<string, 'graceful' | 'force'>()
 const ptyPhysicalExits = new Map<string, PhysicalExitTracker>()
+// Why: a wrapper spawn (macOS TCC login) reports its own status, never the
+// shell's, so its exit numbers must not be read as the agent's (STA-4536).
+const ptyReportsChildExitStatus = new Map<string, boolean>()
 const ptyForceKillTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
 export const LOCAL_PTY_PHYSICAL_EXIT_TIMEOUT_MS = 8_000
@@ -147,7 +151,12 @@ type DataCallback = (payload: {
   transformed?: boolean
   seq?: number
 }) => void
-type ExitCallback = (payload: { id: string; code: number; incarnationId?: string }) => void
+type ExitCallback = (payload: {
+  id: string
+  code: number
+  incarnationId?: string
+  cause?: TerminalExitCause
+}) => void
 
 const dataListeners = new Set<DataCallback>()
 const exitListeners = new Set<ExitCallback>()
@@ -277,6 +286,7 @@ function clearPtyState(id: string): void {
   ptyWslDistroById.delete(id)
   ptyLoadGeneration.delete(id)
   ptyTerminationMode.delete(id)
+  ptyReportsChildExitStatus.delete(id)
   ptyPhysicalExits.delete(id)
 }
 
@@ -523,7 +533,7 @@ export type LocalPtyProviderOptions = {
   getWindowsPowerShellImplementation?: () => 'auto' | 'powershell.exe' | 'pwsh.exe' | undefined
   pwshAvailable?: () => boolean | Promise<boolean>
   onSpawned?: (id: string, incarnationId: string) => void
-  onExit?: (id: string, code: number, incarnationId: string) => void
+  onExit?: (id: string, code: number, incarnationId: string, cause?: TerminalExitCause) => void
   onData?: (
     id: string,
     data: string,
@@ -938,6 +948,7 @@ export class LocalPtyProvider implements IPtyProvider {
         ? null
         : undefined
     createPtyPhysicalExit(id)
+    ptyReportsChildExitStatus.set(id, spawnResult.reportsChildExitStatus !== false)
     ptyProcesses.set(id, proc)
     ptyInitialCwd.set(id, cwd)
     if (spawnedWslDistro !== undefined) {
@@ -1099,7 +1110,15 @@ export class LocalPtyProvider implements IPtyProvider {
       disposables.push(onDataDisposable)
     }
 
-    const onExitDisposable = proc.onExit(({ exitCode }) => {
+    const onExitDisposable = proc.onExit(({ exitCode, signal }) => {
+      // Why: node-pty reports a signalled death as {exitCode: 0, signal: N}; the
+      // cause is built here, where the signal and the spawn's trustworthiness
+      // are both still in hand.
+      const cause = resolveProcessExitCause({
+        exitCode,
+        signal,
+        hostReportsChildExitStatus: ptyReportsChildExitStatus.get(id)
+      })
       const wasTerminationRequested = ptyTerminationMode.has(id)
       ptyPhysicalExits.get(id)?.markExited()
       // Why: neutralize proc.kill before destroy — node-pty SIGHUPs on socket 'close', which can race here and signal a reaped/recycled pid.
@@ -1118,9 +1137,10 @@ export class LocalPtyProvider implements IPtyProvider {
       startupIngressByPty.delete(id)
       // Why: release the master ptmx fd on natural exit, else a clean exit leaks the fd until GC. See docs/fix-pty-fd-leak.md.
       destroyPtyProcess(proc, { alreadyKilled: wasTerminationRequested })
-      this.opts.onExit?.(id, exitCode, incarnationId)
+      ptyReportsChildExitStatus.delete(id)
+      this.opts.onExit?.(id, exitCode, incarnationId, cause)
       for (const cb of exitListeners) {
-        cb({ id, code: exitCode, incarnationId })
+        cb({ id, code: exitCode, incarnationId, cause })
       }
     })
     if (onExitDisposable) {
