@@ -116,18 +116,17 @@ function sanitizeMacAppBundleName(value) {
   )
 }
 
-function getLiveDevBundlePaths() {
-  // One `ps` for every instance, rather than one probe per directory. Not pgrep: macOS pgrep has no
-  // -a (that is a Linux procps extension) and silently prints bare PIDs, which would read as
-  // "nothing is running" and delete a live bundle. -ww prevents the command column being truncated.
+function getDevBundleProcessTable() {
+  // Not pgrep: macOS pgrep has no -a (a Linux procps extension) and silently prints bare PIDs,
+  // which reads as "nothing is running" and deletes a live bundle. -ww keeps the command column
+  // from being truncated. The raw text is searched directly; see dev-electron-bundle-cache.mjs
+  // for why it is deliberately not parsed into paths.
   try {
     return execFileSync('/bin/ps', ['-Awwo', 'command='], {
       encoding: 'utf8',
       stdio: ['ignore', 'pipe', 'ignore'],
       timeout: 5000
     })
-      .split('\n')
-      .flatMap((line) => line.match(/\/\S*\/out\/electron-dev\/[^\s/]+/g) ?? [])
   } catch {
     // Treating a failure as "nothing live" would risk deleting a running bundle, so skip pruning.
     return null
@@ -147,11 +146,11 @@ function pruneStaleDevBundles(distDir) {
   if (dirs.length <= 1) {
     return
   }
-  const livePaths = getLiveDevBundlePaths()
-  if (livePaths === null) {
+  const processTable = getDevBundleProcessTable()
+  if (processTable === null) {
     return
   }
-  for (const dir of selectStaleDevBundleDirs({ dirs, currentDir: distDir, livePaths })) {
+  for (const dir of selectStaleDevBundleDirs({ dirs, currentDir: distDir, processTable })) {
     try {
       rmSync(dir, { recursive: true, force: true })
     } catch {}
