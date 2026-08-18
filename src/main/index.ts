@@ -165,7 +165,7 @@ import { maybeRedirectPackagedCliEntryLaunch } from './startup/packaged-cli-entr
 import { startFirstWindowStartupServices } from './startup/first-window-startup-services'
 import { recoverLegacyWorkerTerminalsForRendererStartup } from './startup/legacy-worker-renderer-recovery'
 import { createWslCliReconciliationStartupBarrier } from './startup/wsl-cli-reconciliation-startup-barrier'
-import { getDevInstanceIdentity } from './startup/dev-instance-identity'
+import { getDevInstanceIdentity, shouldApplyPreReadyAppName } from './startup/dev-instance-identity'
 import { hydrateShellPath, mergePathSegments } from './startup/hydrate-shell-path'
 import { createWindowsShellPathHydration } from './startup/windows-shell-path-hydration'
 import {
@@ -191,6 +191,7 @@ import {
   logStartupMilestone
 } from './startup/startup-diagnostics'
 import { ensureWindowsUserDataAclGrant } from './startup/windows-user-data-acl'
+import { probeWindowsInstallDirAcl } from './startup/windows-install-dir-acl-probe'
 import { neutralizeLegacyTerminalShimDir } from './pty/legacy-terminal-shim-dir'
 import { shouldQuitWhenAllWindowsClosed } from './startup/window-all-closed-quit-policy'
 import {
@@ -866,6 +867,15 @@ if (hasSingleInstanceLock) {
   initClaudeUsagePath()
   initCodexUsagePath()
   initOpenCodeUsagePath()
+  // Why: Electron resolves the macOS safeStorage Keychain service name
+  // ("<app name> Safe Storage") before `ready`, so the setName in whenReady is
+  // too late to move it — dev otherwise lands on the package.json name. Dev-only
+  // so a packaged build keeps deriving the key from its own CFBundleName.
+  // Safe here: dev always pins userData via app.setPath (configure-process.ts),
+  // so setName cannot shift the paths captured just above.
+  if (shouldApplyPreReadyAppName(devInstanceIdentity)) {
+    app.setName(devInstanceIdentity.appName)
+  }
   // Why: must precede app.whenReady() so Crashpad is installed before the
   // first renderer spawns; a CHECK before this point is still exit-code-only.
   startCrashpadCapture()
@@ -1375,6 +1385,9 @@ function openMainWindow(options: { revealOnDidFinishLoad?: boolean } = {}): Brow
         }
       }
     })
+    // Why here: read-only, and the install DACL is the one thing a 0x80000003
+    // child death cannot tell us about itself. See electron/electron#51761.
+    probeWindowsInstallDirAcl({ isServeMode })
   }
 
   const window = createMainWindow(store, {
@@ -2192,7 +2205,9 @@ void app.whenReady().then(async () => {
     }
   )
   electronApp.setAppUserModelId(devInstanceIdentity.appUserModelId)
-  // Why: setName drives the macOS safeStorage Keychain item name; use the stable appName (not per-branch `name`) so dev branches share one key and don't re-prompt.
+  // Why: names the app menu/About panel. Dev already applied this pre-ready (see the
+  // safeStorage note above); this call stays unconditional so packaged builds keep their
+  // existing post-ready rename, which lands after the Keychain name is already resolved.
   app.setName(devInstanceIdentity.appName)
   updateGpuAccelerationAboutPanel()
 
