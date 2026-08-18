@@ -5,6 +5,7 @@
  * readiness scanner watches for before a startup command is written.
  */
 import {
+  markShellReadyWrapperRootInUse,
   pruneStaleShellReadyWrapperRoots,
   writeShellReadyWrappers
 } from '../shell-ready-wrapper-store'
@@ -30,6 +31,10 @@ export function ensureShellReadyWrappersAt(root = getShellReadyWrapperRoot()): v
   // Why existence-only is safe: the default root is keyed by a hash of the exact
   // bytes we would write, so a tree that is present is a tree this build wrote.
   if (didEnsureShellReadyWrappers && shellReadyWrappersExist(root)) {
+    // Why stamp on the cached path too: this is the branch taken for the life of
+    // the process, and it is the only thing telling a sibling build's pruner
+    // that this tree is still launching shells.
+    markShellReadyWrapperRootInUse(root)
     return
   }
   didEnsureShellReadyWrappers = true

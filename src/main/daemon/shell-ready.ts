@@ -8,6 +8,7 @@ import {
 import { getFishCodexShellLaunchPreflight } from '../pty/codex-shell-launch-preflight'
 import { getFishShellReadyInitCommand } from '../shell-templates'
 import {
+  markShellReadyWrapperRootInUse,
   pruneStaleShellReadyWrapperRoots,
   resolveShellReadyWrapperRoot,
   shellReadyWrappersExistAt,
@@ -100,6 +101,10 @@ function ensureShellReadyWrappers(): void {
     didEnsureShellReadyWrappers &&
     shellReadyWrappersExistAt(root, buildDaemonShellReadyWrapperFiles)
   ) {
+    // Why stamp on the cached path too: this is the branch a long-lived daemon
+    // takes for weeks, and it is the only thing telling a sibling build's
+    // pruner that this tree is still launching shells.
+    markShellReadyWrapperRootInUse(root)
     return
   }
   didEnsureShellReadyWrappers = true

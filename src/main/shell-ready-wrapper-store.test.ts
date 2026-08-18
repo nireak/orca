@@ -12,6 +12,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join } from 'node:path'
 import {
   pruneStaleShellReadyWrapperRoots,
+  markShellReadyWrapperRootInUse,
   resolveShellReadyWrapperRoot,
   shellReadyWrappersExistAt,
   writeShellReadyWrappers,
@@ -95,7 +96,7 @@ describe('pruneStaleShellReadyWrapperRoots', () => {
     const keepRoot = resolveShellReadyWrapperRoot(base, build)
     writeShellReadyWrappers(keepRoot, build)
 
-    const staleDir = join(base, 'stale-hash')
+    const staleDir = join(base, '00112233445566aa')
     mkdirSync(join(staleDir, 'shell-ready'), { recursive: true })
     const longAgo = new Date(Date.now() - 40 * DAY_MS)
     utimesSync(staleDir, longAgo, longAgo)
@@ -126,6 +127,69 @@ describe('pruneStaleShellReadyWrapperRoots', () => {
 
     expect(existsSync(legacyZshrc)).toBe(true)
     expect(shellReadyWrappersExistAt(keepRoot, build)).toBe(true)
+  })
+
+  // Why: main and the daemon hash to different trees under one base dir and each
+  // exempts only its own, so an aged-but-live sibling is the tree most likely to
+  // be collected out from under a running process. Writes land two levels down,
+  // so without an explicit liveness stamp the hash dir's mtime never advances
+  // past its creation time and this deletes an actively-used tree.
+  // Why: the pruner's delete is recursive, so it must only ever consider names
+  // this store could itself have produced.
+  it('ignores directories it could not have created', () => {
+    const base = makeBase()
+    const build = builderFor('a')
+    const keepRoot = resolveShellReadyWrapperRoot(base, build)
+    writeShellReadyWrappers(keepRoot, build)
+
+    const foreign = join(base, 'not-a-wrapper-tree')
+    mkdirSync(foreign, { recursive: true })
+    const longAgo = new Date(Date.now() - 400 * DAY_MS)
+    utimesSync(foreign, longAgo, longAgo)
+
+    pruneStaleShellReadyWrapperRoots(base, keepRoot)
+
+    expect(existsSync(foreign)).toBe(true)
+  })
+
+  it('keeps an aged sibling tree that is still launching shells', () => {
+    const base = makeBase()
+    const mine = builderFor('mine')
+    const sibling = builderFor('sibling')
+    const myRoot = resolveShellReadyWrapperRoot(base, mine)
+    const siblingRoot = resolveShellReadyWrapperRoot(base, sibling)
+    writeShellReadyWrappers(myRoot, mine)
+    writeShellReadyWrappers(siblingRoot, sibling)
+
+    // Age both trees past the window, as a month-old install would look.
+    const longAgo = new Date(Date.now() - 40 * DAY_MS)
+    utimesSync(dirname(myRoot), longAgo, longAgo)
+    utimesSync(dirname(siblingRoot), longAgo, longAgo)
+
+    // The sibling process launches a shell: it takes the cached ensure path and
+    // stamps liveness without rewriting anything.
+    markShellReadyWrapperRootInUse(siblingRoot)
+
+    pruneStaleShellReadyWrapperRoots(base, myRoot)
+
+    expect(shellReadyWrappersExistAt(siblingRoot, sibling)).toBe(true)
+  })
+
+  it('still collects an aged tree that nothing has launched from', () => {
+    const base = makeBase()
+    const mine = builderFor('mine')
+    const abandoned = builderFor('abandoned')
+    const myRoot = resolveShellReadyWrapperRoot(base, mine)
+    const abandonedRoot = resolveShellReadyWrapperRoot(base, abandoned)
+    writeShellReadyWrappers(myRoot, mine)
+    writeShellReadyWrappers(abandonedRoot, abandoned)
+
+    const longAgo = new Date(Date.now() - 40 * DAY_MS)
+    utimesSync(dirname(abandonedRoot), longAgo, longAgo)
+
+    pruneStaleShellReadyWrapperRoots(base, myRoot)
+
+    expect(existsSync(dirname(abandonedRoot))).toBe(false)
   })
 
   it('keeps recently written trees belonging to other live builds', () => {

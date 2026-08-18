@@ -4,6 +4,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { spawnSync } from 'node:child_process'
 import { getShellReadyLaunchConfig } from '../../local-pty-shell-ready'
 import { escapeRegex } from '../../../../shared/string-utils'
+import { getShellReadyWrapperRoot } from '../../local-pty-shell-ready-wrapper-root'
 
 const RUN_MARKER = /^[ \t]*#[ \t]*Run:.*$/m
 
@@ -130,7 +131,11 @@ function normalizeOutput(
     return output
   }
 
-  const wrapperDir = join(ctx.userDataPath, 'shell-ready', ctx.shellName)
+  // Why resolved rather than rebuilt: the wrapper tree is content-addressed, so
+  // its path carries a hash. Rebuilding it from userDataPath yields a directory
+  // that never appears in the output, and the placeholder silently stops
+  // substituting -- baking a machine-specific path into any future snapshot.
+  const wrapperDir = join(getShellReadyWrapperRoot(), ctx.shellName)
 
   const paths: { path: string; placeholder: string }[] = [
     { path: wrapperDir, placeholder: '<WRAPPER_DIR>' },

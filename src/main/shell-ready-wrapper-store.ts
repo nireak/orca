@@ -14,11 +14,13 @@ import { createHash } from 'node:crypto'
 import {
   chmodSync,
   existsSync,
+  lstatSync,
   mkdirSync,
   readdirSync,
   renameSync,
   rmSync,
   statSync,
+  utimesSync,
   writeFileSync,
   type Dirent
 } from 'node:fs'
@@ -36,6 +38,10 @@ export type ShellReadyWrapperBuilder = (root: string) => readonly ShellReadyWrap
 // still covering every difference that matters (marker contract, hook order).
 const HASH_PROBE_ROOT = '/__orca_shell_ready_root__'
 const ROOT_HASH_LENGTH = 16
+// Why: bounds the pruner's recursive delete to directory names this store could
+// itself have produced, so an unrelated directory sharing the base dir is never
+// a deletion candidate.
+const WRAPPER_ROOT_DIR_PATTERN = /^[0-9a-f]{16}$/
 // Why the hash sits ABOVE this leaf rather than below it: ZDOTDIR self-reference
 // guards -- three in TS and eight `*/shell-ready/zsh` globs baked into the
 // wrapper scripts -- match on that exact suffix. Without it a wrapper sources
@@ -43,8 +49,9 @@ const ROOT_HASH_LENGTH = 16
 // `<base>/<hash>/shell-ready/zsh` leaves every one of those guards intact, and
 // keeps older builds able to recognize a newer build's dir.
 const WRAPPER_ROOT_LEAF = 'shell-ready'
-// Why: long enough that a tree in active use by a long-lived daemon is never
-// collected, and a daemon that does lose its tree regenerates it on next spawn.
+// Why: far longer than any plausible gap between launches, so a tree in active
+// use is never collected (see markShellReadyWrapperRootInUse for the liveness
+// stamp this window is measured against).
 const STALE_ROOT_MAX_AGE_MS = 30 * 24 * 60 * 60 * 1000
 
 let tempFileCounter = 0
@@ -77,10 +84,31 @@ export function writeShellReadyWrappers(root: string, build: ShellReadyWrapperBu
     mkdirSync(dirname(path), { recursive: true })
     writeWrapperFileAtomically(path, file.content)
   }
+  markShellReadyWrapperRootInUse(root)
 }
 
-/** Drops wrapper trees no build has rewritten in a month. Safe because a daemon
- *  still pointing at a collected tree regenerates it on its next spawn. */
+/** Records that this tree is still in use, so a sibling build's pruner leaves it
+ *  alone. Callers must invoke this on every launch, not only when writing.
+ *
+ *  Why it is needed: writes land two levels down (`<hash>/shell-ready/zsh/...`),
+ *  and a directory's mtime only moves when its direct children change -- so the
+ *  hash dir's mtime is its CREATION time and never advances on rewrite. Without
+ *  this, staleness means "created 30 days ago" rather than "unused for 30 days",
+ *  and because main and the daemon hash to different trees under one base dir,
+ *  each would collect the other's actively-used tree on any month-old install. */
+export function markShellReadyWrapperRootInUse(root: string): void {
+  const now = new Date()
+  try {
+    // The hash dir is what the pruner stats, so that is what has to move.
+    utimesSync(dirname(root), now, now)
+  } catch {
+    // Best effort: a tree we cannot stamp is not worth failing a spawn over.
+  }
+}
+
+/** Drops wrapper trees no build has launched a shell from in a month, per
+ *  markShellReadyWrapperRootInUse. Safe because a daemon still pointing at a
+ *  collected tree regenerates it on its next spawn. */
 export function pruneStaleShellReadyWrapperRoots(
   baseDir: string,
   keepRoot: string,
@@ -89,12 +117,19 @@ export function pruneStaleShellReadyWrapperRoots(
   const keepDir = dirname(keepRoot)
   let entries: Dirent[]
   try {
+    // Why lstat first: readdir follows a symlinked base dir, which would point
+    // the recursive delete below at real directories somewhere else entirely.
+    if (lstatSync(baseDir).isSymbolicLink()) {
+      return
+    }
     entries = readdirSync(baseDir, { withFileTypes: true })
   } catch {
     return
   }
   for (const entry of entries) {
-    if (!entry.isDirectory()) {
+    // isDirectory() is false for a symlink-to-directory, so entries that point
+    // outside the base dir are skipped here rather than followed.
+    if (!entry.isDirectory() || !WRAPPER_ROOT_DIR_PATTERN.test(entry.name)) {
       continue
     }
     const candidate = join(baseDir, entry.name)
@@ -118,7 +153,11 @@ function writeWrapperFileAtomically(path: string, content: string): void {
   tempFileCounter += 1
   const tempPath = `${path}.tmp-${process.pid}-${tempFileCounter}`
   try {
-    writeFileSync(tempPath, content, 'utf8')
+    // Why `wx`: fails rather than writing through a pre-existing path at this
+    // predictable name. Without it a planted symlink turns an Orca-authored
+    // shell script into an arbitrary-file write at the attacker's target.
+    writeFileSync(tempPath, content, { encoding: 'utf8', flag: 'wx', mode: 0o644 })
+    // Why chmod anyway: the mode above is masked by umask.
     chmodSync(tempPath, 0o644)
     renameSync(tempPath, path)
   } catch (error) {
