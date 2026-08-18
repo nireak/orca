@@ -16,6 +16,7 @@ import { useMountedRef } from '@/hooks/useMountedRef'
 import {
   formatCrashReportText,
   isReactErrorBoundaryReport,
+  MAX_USER_NOTES_LENGTH,
   type CrashReportDiagnosticBundle,
   type CrashReportRecord
 } from '../../../../shared/crash-reporting'
@@ -281,6 +282,9 @@ export function CrashReportDialogSurface({
             value={notes}
             onChange={(event) => setNotes(event.target.value)}
             rows={4}
+            // Why: the formatter caps notes anyway; stop at the same length here so
+            // the user sees the limit instead of losing text at submit.
+            maxLength={MAX_USER_NOTES_LENGTH}
             placeholder={getNotesPlaceholder(report)}
             className="min-h-24 w-full rounded-md border border-border bg-background px-3 py-2 text-sm outline-none ring-offset-background placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
           />

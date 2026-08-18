@@ -4,6 +4,13 @@ import {
 } from './crash-reporting-diagnostic-bundle'
 import { appendMinidumpSignatureLines } from './crash-report-signature-lines'
 import { formatCrashReportExitCode } from './crash-report-exit-code'
+import { sanitizeCrashReportString } from './crash-report-redaction'
+
+export {
+  sanitizeCrashReportBreadcrumbs,
+  sanitizeCrashReportDetails,
+  sanitizeCrashReportString
+} from './crash-report-redaction'
 
 export type { CrashReportDiagnosticBundle } from './crash-reporting-diagnostic-bundle'
 
@@ -124,27 +131,16 @@ export type CrashReportCopyDiagnosticsArgs = {
   submissionFailure?: CrashReportCopySubmissionFailure
 }
 
-const MAX_STRING_DETAIL_LENGTH = 240
-const MAX_STACK_DETAIL_LENGTH = 4_000
-const MAX_BREADCRUMB_NAME_LENGTH = 80
-const MAX_BREADCRUMBS = 30
+// Why: notes are free-form prose, not a telemetry detail value. 240 chars cut real
+// reports mid-sentence; 8k is a full page and still only 12% of the report budget.
+export const MAX_USER_NOTES_LENGTH = 8_000
+// Why: redaction shrinks text, so sanitize a little more than the budget and let the
+// cap land on the redacted result. Bounding the input is the point: the sanitizer
+// walks it with backtracking patterns, and an unbounded paste is a frozen dialog.
+const MAX_USER_NOTES_SANITIZE_LENGTH = MAX_USER_NOTES_LENGTH * 2
 const MAX_FORMATTED_REPORT_LENGTH = 64_000
 const FORMATTED_REPORT_TRUNCATION_SUFFIX =
   '\n\n[Crash report truncated to fit feedback endpoint limits.]'
-const SECRET_PATTERNS = [
-  /\b(gh[pousr]_[A-Za-z0-9_]{20,})\b/g,
-  /\b(sk-[A-Za-z0-9_-]{20,})\b/g,
-  /\b([A-Za-z0-9._%+-]+:[A-Za-z0-9._%+-]+@)(?=[^/\s]+)/g,
-  /\b(token|api[_-]?key|secret|password)=([^&\s]+)/gi
-]
-
-const PATH_PATTERNS = [
-  /\/(?:Users|home)\/(?:(?!\s+(?:\/|[A-Za-z]:\\|\\\\|gh[pousr]_|sk-|(?:token|api[_-]?key|secret|password)=))[^"'`<>\n\r)])+/gi,
-  /\/(?:Applications|Library|System|Volumes|etc|media|mnt|opt|private|root|srv|tmp|usr|var)\/(?:(?!\s+(?:\/|[A-Za-z]:\\|\\\\|gh[pousr]_|sk-|(?:token|api[_-]?key|secret|password)=))[^"'`<>\n\r)])+/gi,
-  /\/[A-Za-z0-9._ -]+\/(?:(?!\s+(?:\/|[A-Za-z]:\\|\\\\|gh[pousr]_|sk-|(?:token|api[_-]?key|secret|password)=))[^"'`<>\n\r)])+/gi,
-  /[A-Za-z]:\\(?:(?!\s+(?:\/|[A-Za-z]:\\|\\\\|gh[pousr]_|sk-|(?:token|api[_-]?key|secret|password)=))[^"'`<>\n\r)])+/gi,
-  /\\\\[^\\\s"'`<>\n\r)]+\\(?:(?!\s+(?:\/|[A-Za-z]:\\|\\\\|gh[pousr]_|sk-|(?:token|api[_-]?key|secret|password)=))[^"'`<>\n\r)])+/gi
-]
 export function isCrashReportReason(reason: string): boolean {
   return [
     'abnormal-exit',
@@ -165,71 +161,31 @@ export function isReactErrorBoundaryReport(report: CrashReportRecord): boolean {
   )
 }
 
-export function sanitizeCrashReportString(
-  value: string,
-  maxLength = MAX_STRING_DETAIL_LENGTH
-): string {
-  let sanitized = value
-  for (const pattern of PATH_PATTERNS) {
-    sanitized = sanitized.replace(pattern, '[redacted-path]')
+// Why: notes lead the report because the 64k tail truncation would otherwise drop
+// the one irreplaceable section whenever details or breadcrumbs run long.
+const USER_NOTES_BEGIN = '--- begin user notes ---'
+const USER_NOTES_END = '--- end user notes ---'
+
+function appendUserNotesLines(lines: string[], notes: string | undefined): void {
+  const trimmedNotes = notes?.trim()
+  if (!trimmedNotes) {
+    return
   }
-  for (const pattern of SECRET_PATTERNS) {
-    sanitized = sanitized.replace(pattern, (match, key?: string) => {
-      if (key && /^(token|api[_-]?key|secret|password)$/i.test(key)) {
-        return `${key}=[redacted]`
-      }
-      return match.includes('@') ? '[redacted-credential]@' : '[redacted-secret]'
-    })
-  }
-  return sanitized.length > maxLength ? `${sanitized.slice(0, maxLength)}...` : sanitized
-}
-
-function maxDetailStringLengthForKey(key: string): number {
-  const normalizedKey = key.replace(/([a-z0-9])([A-Z])/g, '$1_$2')
-  return /(?:^|_)(?:stack|component_stack|error_stack|minidump_check_message)$/i.test(normalizedKey)
-    ? MAX_STACK_DETAIL_LENGTH
-    : MAX_STRING_DETAIL_LENGTH
-}
-
-export function sanitizeCrashReportDetails(
-  details: Record<string, unknown>
-): Record<string, CrashReportDetailValue> {
-  const sanitized: Record<string, CrashReportDetailValue> = {}
-  for (const [key, value] of Object.entries(details)) {
-    if (typeof value === 'string') {
-      sanitized[key] = sanitizeCrashReportString(value, maxDetailStringLengthForKey(key))
-    } else if (typeof value === 'number' && Number.isFinite(value)) {
-      sanitized[key] = value
-    } else if (typeof value === 'boolean' || value === null) {
-      sanitized[key] = value
-    }
-  }
-  return sanitized
-}
-
-export function sanitizeCrashReportBreadcrumbs(
-  breadcrumbs: CrashReportBreadcrumbInput[] | undefined
-): CrashReportBreadcrumb[] | undefined {
-  if (!breadcrumbs || breadcrumbs.length === 0) {
-    return undefined
-  }
-
-  const sanitized = breadcrumbs
-    .slice(-MAX_BREADCRUMBS)
-    .map((breadcrumb): CrashReportBreadcrumb | null => {
-      if (!breadcrumb.name.trim() || !breadcrumb.createdAt.trim()) {
-        return null
-      }
-      const data = breadcrumb.data ? sanitizeCrashReportDetails(breadcrumb.data) : {}
-      return {
-        createdAt: sanitizeCrashReportString(breadcrumb.createdAt),
-        name: sanitizeCrashReportString(breadcrumb.name).slice(0, MAX_BREADCRUMB_NAME_LENGTH),
-        ...(Object.keys(data).length > 0 ? { data } : {})
-      }
-    })
-    .filter((breadcrumb): breadcrumb is CrashReportBreadcrumb => breadcrumb !== null)
-
-  return sanitized.length > 0 ? sanitized : undefined
+  const sanitized = sanitizeCrashReportString(
+    trimmedNotes.slice(0, MAX_USER_NOTES_SANITIZE_LENGTH),
+    MAX_USER_NOTES_LENGTH
+  )
+  // Why fenced and indented: notes are verbatim user text and now precede the
+  // machine-generated sections, so a bare line reading `Details:` would parse
+  // ahead of the real one. Two spaces make any note line unmatchable by a
+  // line-anchored reader without hurting readability.
+  lines.push(
+    '',
+    'User notes:',
+    USER_NOTES_BEGIN,
+    ...sanitized.split('\n').map((line) => `  ${line}`),
+    USER_NOTES_END
+  )
 }
 
 export function formatCrashReportText(
@@ -253,6 +209,7 @@ export function formatCrashReportText(
     `Chrome: ${report.chromeVersion}`
   ]
 
+  appendUserNotesLines(lines, notes)
   appendMinidumpSignatureLines(lines, report.details)
   appendDiagnosticBundleLines(lines, diagnosticBundle, sanitizeCrashReportString)
 
@@ -276,11 +233,6 @@ export function formatCrashReportText(
     }
   }
 
-  const trimmedNotes = notes?.trim()
-  if (trimmedNotes) {
-    lines.push('', 'User notes:', sanitizeCrashReportString(trimmedNotes))
-  }
-
   return truncateFormattedCrashReport(lines.join('\n'))
 }
 
@@ -290,9 +242,16 @@ export function formatUncapturedCrashReportText(
   diagnosticBundle?: CrashReportDiagnosticBundle
 ): string {
   const lines = [
+    // Why the header is unchanged: every archived report in the crash channel
+    // starts with this line and the reader is an out-of-tree service, so a
+    // prefix-anchored parser there would break on a new spelling. The additive
+    // `Submission kind` below is what distinguishes feedback. Note this does
+    // not change how the submission is counted: submissionType stays 'crash'
+    // on the wire, so the taxonomy is a separate server-side change.
     '[Crash Report]',
     '',
     'Report ID: not captured',
+    'Submission kind: help-menu-feedback',
     `Created: ${context.createdAt}`,
     'Status: uncaptured',
     'Source: user-reported',
@@ -309,12 +268,8 @@ export function formatUncapturedCrashReportText(
     '- report_source: help_menu'
   ]
 
+  appendUserNotesLines(lines, notes)
   appendDiagnosticBundleLines(lines, diagnosticBundle, sanitizeCrashReportString)
-
-  const trimmedNotes = notes?.trim()
-  if (trimmedNotes) {
-    lines.push('', 'User notes:', sanitizeCrashReportString(trimmedNotes))
-  }
 
   return truncateFormattedCrashReport(lines.join('\n'))
 }
