@@ -201,9 +201,10 @@ function writeWrapperFileAtomically(path: string, content: string): void {
     // Why chmod anyway: the mode passed to open() is masked by umask.
     chmodSync(tempPath, 0o644)
     // Why the retry wrapper: on Windows an indexer or antivirus can hold the
-    // destination open and the rename fails with EPERM/EACCES/EBUSY. The first
-    // ensure in every process rewrites an existing tree, so this replaces a live
-    // file on the terminal-spawn path.
+    // destination open and the rename fails with EPERM/EACCES/EBUSY. Callers no
+    // longer rewrite a tree that is already complete, so the destination is
+    // normally absent -- but a tree being repaired after a partial write does
+    // replace files a concurrent build may have open.
     renameFileWithWindowsRetry(tempPath, path)
   } catch (error) {
     rmSync(tempPath, { force: true })

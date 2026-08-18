@@ -20,7 +20,9 @@ import {
   shellReadyWrappersExist
 } from './local-pty-shell-ready-wrapper-root'
 
-let didPruneShellReadyWrapperRoots = false
+// Why keyed on the base dir rather than a bare flag: it mirrors the root
+// cache, so a re-pointed ORCA_USER_DATA_PATH sweeps its new base too.
+let prunedShellReadyWrapperBaseDir: string | null = null
 
 export function getZshShellReadyRcfileContent(): string {
   return buildZshStartupWrapperFiles(getLocalZshWrapperSpec(`${getShellReadyWrapperRoot()}/zsh`))
@@ -58,9 +60,10 @@ export function ensureShellReadyWrappersAt(root = getShellReadyWrapperRoot()): v
   // Why guarded: callers may target an explicit root (tests, snapshots); only the
   // managed default owns the base dir and may collect siblings there. Why once:
   // the sweep is per-process startup work, not per-spawn work.
-  if (!didPruneShellReadyWrapperRoots && root === getShellReadyWrapperRoot()) {
-    didPruneShellReadyWrapperRoots = true
-    pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
+  const baseDir = getShellReadyWrapperBaseDir()
+  if (prunedShellReadyWrapperBaseDir !== baseDir && root === getShellReadyWrapperRoot()) {
+    prunedShellReadyWrapperBaseDir = baseDir
+    pruneStaleShellReadyWrapperRoots(baseDir, root)
   }
 }
 

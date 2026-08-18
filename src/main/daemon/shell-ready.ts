@@ -19,7 +19,9 @@ import { buildDaemonShellReadyWrapperFiles } from './daemon-shell-ready-wrapper-
 
 const ORCA_USER_DATA_PATH_ENV = 'ORCA_USER_DATA_PATH'
 
-let didPruneShellReadyWrapperRoots = false
+// Why keyed on the base dir rather than a bare flag: it mirrors the root
+// cache, so a re-pointed ORCA_USER_DATA_PATH sweeps its new base too.
+let prunedShellReadyWrapperBaseDir: string | null = null
 
 function getShellReadyWrapperBaseDir(): string {
   const userDataPath = process.env[ORCA_USER_DATA_PATH_ENV]
@@ -129,9 +131,10 @@ function ensureShellReadyWrappers(): void {
   markShellReadyWrapperRootInUse(root)
 
   // Why once: the sweep is per-process startup work, not per-spawn work.
-  if (!didPruneShellReadyWrapperRoots) {
-    didPruneShellReadyWrapperRoots = true
-    pruneStaleShellReadyWrapperRoots(getShellReadyWrapperBaseDir(), root)
+  const baseDir = getShellReadyWrapperBaseDir()
+  if (prunedShellReadyWrapperBaseDir !== baseDir) {
+    prunedShellReadyWrapperBaseDir = baseDir
+    pruneStaleShellReadyWrapperRoots(baseDir, root)
   }
 }
 
