@@ -634,7 +634,7 @@ index 7b4b9e1f990fbf95b51528bb56dc9717f5b87532..2ae787c5bd4f3eba470584dc658a01a5
  }
  #endif
 diff --git a/src/unixTerminal.ts b/src/unixTerminal.ts
-index 98733dc0cd752b554bd94e45904ca341ad141bba..8c9678fc810323bc79dab1ba3cc86aa74ed9d4e2 100644
+index 98733dc0cd752b554bd94e45904ca341ad141bba..3ee4a56cd71193df545a2107c30f8e674784612d 100644
 --- a/src/unixTerminal.ts
 +++ b/src/unixTerminal.ts
 @@ -306,6 +306,13 @@ interface IWriteTask {
@@ -651,7 +651,7 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..8c9678fc810323bc79dab1ba3cc86aa7
  /**
   * A custom write stream that writes directly to a file descriptor with proper
   * handling of backpressure and errors. This avoids some event loop exhaustion
-@@ -314,7 +321,7 @@ interface IWriteTask {
+@@ -314,20 +321,28 @@ interface IWriteTask {
  class CustomWriteStream implements IDisposable {
  
    private readonly _writeQueue: IWriteTask[] = [];
@@ -659,17 +659,41 @@ index 98733dc0cd752b554bd94e45904ca341ad141bba..8c9678fc810323bc79dab1ba3cc86aa7
 +  private _writeImmediate: NodeJS.Timeout | undefined;
  
    constructor(
-     private readonly _fd: number,
-@@ -323,7 +330,7 @@ class CustomWriteStream implements IDisposable {
+-    private readonly _fd: number,
++    private _fd: number,
+     private readonly _encoding: BufferEncoding
+   ) {
    }
  
    dispose(): void {
 -    clearImmediate(this._writeImmediate);
 +    clearTimeout(this._writeImmediate);
      this._writeImmediate = undefined;
++    // Orca: retire this stream's own copy of the master fd and drop what has
++    // not shipped, so nothing queued here reaches a reused descriptor.
++    this._fd = -1;
++    this._writeQueue.length = 0;
    }
  
-@@ -357,9 +364,11 @@ class CustomWriteStream implements IDisposable {
+   write(data: string | Buffer): void {
++    if (this._fd < 0) {
++      return;
++    }
++
+     // Writes are put in a queue and processed asynchronously in order to handle
+     // backpressure from the kernel buffer.
+     const buffer = typeof data === 'string'
+@@ -345,7 +360,8 @@ class CustomWriteStream implements IDisposable {
+   private _processWriteQueue(): void {
+     this._writeImmediate = undefined;
+ 
+-    if (this._writeQueue.length === 0) {
++    // Orca: an in-flight fs.write can re-enter here after dispose().
++    if (this._fd < 0 || this._writeQueue.length === 0) {
+       return;
+     }
+ 
+@@ -357,9 +373,11 @@ class CustomWriteStream implements IDisposable {
      fs.write(this._fd, task.buffer, task.offset, (err, written) => {
        if (err) {
          if ('code' in err && err.code === 'EAGAIN') {
